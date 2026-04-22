@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "protocol_portals",
+  "version": "${version}",
+
+  "name": "Protocol Portals",
+  "description": "Some things in my live is never change",
+  "authors": [],
+  "contact": {},
+
+  "license": "All-Rights-Reserved",
+  "icon": "assets/protocol_portals/icon.png",
+
+  "environment": "client",
+  "entrypoints": {
+    "client": ["padej.client.MainClient"],
+    "main": ["padej.Main"]
+  },
+
+  "mixins": [
+    "protocol_portals.mixins.json"
+  ],
+
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
