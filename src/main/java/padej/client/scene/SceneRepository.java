@@ -10,6 +10,7 @@ import net.minecraft.client.world.ClientWorld;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.LightType;
 import net.minecraft.world.chunk.WorldChunk;
 
@@ -27,10 +28,11 @@ import java.util.regex.Pattern;
 public final class SceneRepository {
     private static final Pattern FILE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final String FILE_EXTENSION = ".nbt";
-    private static final int SNAPSHOT_HORIZONTAL_RADIUS_BLOCKS = 48;
-    private static final int SNAPSHOT_VERTICAL_RADIUS_BLOCKS = 48;
-    private static final int MAX_CAPTURED_BLOCKS = 180_000;
-    private static final int MAX_CAPTURED_LIGHT_SAMPLES = 240_000;
+    private static final int SNAPSHOT_HORIZONTAL_RADIUS_BLOCKS = 96;
+    private static final int SNAPSHOT_VERTICAL_RADIUS_BLOCKS = 64;
+    private static final int MAX_CAPTURED_BLOCKS = 260_000;
+    private static final int MAX_CAPTURED_LIGHT_SAMPLES = 320_000;
+    private static final Direction[] NEIGHBOR_DIRECTIONS = Direction.values();
 
     private final Path scenesDir;
     private final Map<String, SceneSnapshot> cache = new HashMap<>();
@@ -108,6 +110,7 @@ public final class SceneRepository {
         List<SceneSnapshot.LightSample> lightSamples = new ArrayList<>();
         BlockPos.Mutable mutableChunkPos = new BlockPos.Mutable();
         BlockPos.Mutable mutableWorldPos = new BlockPos.Mutable();
+        BlockPos.Mutable mutableNeighborPos = new BlockPos.Mutable();
         boolean truncated = false;
 
         captureLoop:
@@ -153,6 +156,21 @@ public final class SceneRepository {
                                         break captureLoop;
                                     }
                                 }
+                                continue;
+                            }
+
+                            if (!shouldCaptureSolidBlock(
+                                    world,
+                                    mutableWorldPos,
+                                    mutableNeighborPos,
+                                    state,
+                                    minX,
+                                    maxX,
+                                    minY,
+                                    maxY,
+                                    minZ,
+                                    maxZ
+                            )) {
                                 continue;
                             }
 
@@ -211,5 +229,45 @@ public final class SceneRepository {
 
     private String normalize(String fileName) {
         return fileName.toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean shouldCaptureSolidBlock(
+            ClientWorld world,
+            BlockPos.Mutable worldPos,
+            BlockPos.Mutable neighborPos,
+            BlockState state,
+            int minX,
+            int maxX,
+            int minY,
+            int maxY,
+            int minZ,
+            int maxZ
+    ) {
+        // Keep all non-full or non-opaque blocks (stairs, slabs, fences, glass, foliage, etc.).
+        if (!state.isOpaqueFullCube(world, worldPos)) {
+            return true;
+        }
+
+        int x = worldPos.getX();
+        int y = worldPos.getY();
+        int z = worldPos.getZ();
+
+        // Keep dense full-cube blocks only if they touch air (surface shell).
+        for (Direction direction : NEIGHBOR_DIRECTIONS) {
+            int nx = x + direction.getOffsetX();
+            int ny = y + direction.getOffsetY();
+            int nz = z + direction.getOffsetZ();
+
+            if (nx < minX || nx > maxX || ny < minY || ny > maxY || nz < minZ || nz > maxZ) {
+                return true;
+            }
+
+            neighborPos.set(nx, ny, nz);
+            if (world.getBlockState(neighborPos).isAir()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
