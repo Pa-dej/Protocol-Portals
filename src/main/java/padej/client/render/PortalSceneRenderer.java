@@ -35,14 +35,17 @@ import padej.client.portal.PortalRenderBlock;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class PortalSceneRenderer {
     private static final int OUTER_STENCIL_VALUE = 0;
     private static final int THIS_PORTAL_STENCIL_VALUE = 1;
     private static final double MAX_PORTAL_RENDER_DISTANCE_SQ = 96.0D * 96.0D;
-    private static final double MAX_BLOCK_RENDER_DISTANCE_SQ = 256.0D * 256.0D;
+    private static final double BASE_MAX_BLOCK_RENDER_DISTANCE = 256.0D;
     private static final double PORTAL_FRONT_CLIP_EPSILON = 1.0E-3D;
+    private static final double FRUSTUM_CULL_EPSILON = 1.0E-4D;
 
     private final PortalManager portalManager;
     private boolean stencilReadyThisFrame = false;
@@ -91,6 +94,9 @@ public final class PortalSceneRenderer {
 
         Vec3d camera = context.camera().getPos();
         float tickDelta = context.tickCounter().getTickDelta(false);
+        int currentFps = MinecraftClient.getInstance().getCurrentFps();
+        double dynamicBlockRenderDistanceSq = computeDynamicPortalBlockDistanceSq(portals.size(), currentFps);
+        Map<String, SceneBlockRenderView> sceneViewCache = new HashMap<>();
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -103,7 +109,7 @@ public final class PortalSceneRenderer {
             }
 
             if (!stencilReadyThisFrame) {
-                renderFallbackWithoutStencil(portals, camera, tickDelta);
+                renderFallbackWithoutStencil(portals, camera, tickDelta, sceneViewCache, dynamicBlockRenderDistanceSq);
                 return;
             }
 
@@ -121,7 +127,7 @@ public final class PortalSceneRenderer {
                 }
 
                 clearDepthOfPortalViewArea(portal, matrix);
-                renderPortalContentInStencil(portal, camera, tickDelta);
+                renderPortalContentInStencil(portal, camera, tickDelta, sceneViewCache, dynamicBlockRenderDistanceSq);
                 restoreDepthOfPortalViewArea(portal, matrix);
                 clampStencilValue(OUTER_STENCIL_VALUE);
             }
@@ -200,7 +206,13 @@ public final class PortalSceneRenderer {
         GL11.glDepthRange(0.0D, 1.0D);
     }
 
-    private void renderPortalContentInStencil(PortalInstance portal, Vec3d camera, float tickDelta) {
+    private void renderPortalContentInStencil(
+            PortalInstance portal,
+            Vec3d camera,
+            float tickDelta,
+            Map<String, SceneBlockRenderView> sceneViewCache,
+            double maxBlockRenderDistanceSq
+    ) {
         RenderSystem.disableBlend();
         RenderSystem.colorMask(true, true, true, true);
         RenderSystem.depthMask(true);
@@ -212,7 +224,7 @@ public final class PortalSceneRenderer {
         // World-aligned mode: blocks are placed along world axes, not along portal normal,
         // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
         // The stencil + depth buffer together handle correct visibility - no plane clip needed.
-        renderPortalBlocks(portal, camera, false, tickDelta);
+        renderPortalBlocks(portal, camera, false, tickDelta, sceneViewCache, maxBlockRenderDistanceSq);
     }
 
     private void restoreDepthOfPortalViewArea(PortalInstance portal, Matrix4f matrix) {
@@ -330,7 +342,13 @@ public final class PortalSceneRenderer {
         RenderSystem.enableCull();
     }
 
-    private void renderFallbackWithoutStencil(List<PortalInstance> portals, Vec3d camera, float tickDelta) {
+    private void renderFallbackWithoutStencil(
+            List<PortalInstance> portals,
+            Vec3d camera,
+            float tickDelta,
+            Map<String, SceneBlockRenderView> sceneViewCache,
+            double maxBlockRenderDistanceSq
+    ) {
         RenderSystem.enableDepthTest();
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         RenderSystem.disableCull();
@@ -344,7 +362,7 @@ public final class PortalSceneRenderer {
             if (!isPortalValidForRendering(portal, camera)) {
                 continue;
             }
-            renderPortalBlocks(portal, camera, false, tickDelta);
+            renderPortalBlocks(portal, camera, false, tickDelta, sceneViewCache, maxBlockRenderDistanceSq);
         }
 
         MatrixStack overlayStack = new MatrixStack();
@@ -353,7 +371,14 @@ public final class PortalSceneRenderer {
         RenderSystem.enableCull();
     }
 
-    private void renderPortalBlocks(PortalInstance portal, Vec3d camera, boolean clipAgainstPortalPlane, float tickDelta) {
+    private void renderPortalBlocks(
+            PortalInstance portal,
+            Vec3d camera,
+            boolean clipAgainstPortalPlane,
+            float tickDelta,
+            Map<String, SceneBlockRenderView> sceneViewCache,
+            double maxBlockRenderDistanceSq
+    ) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) {
             return;
@@ -364,8 +389,12 @@ public final class PortalSceneRenderer {
         VertexConsumerProvider.Immediate vertexConsumers = client.getBufferBuilders().getEntityVertexConsumers();
         MatrixStack blockMatrices = new MatrixStack();
         blockMatrices.translate(-camera.x, -camera.y, -camera.z);
-        SceneBlockRenderView sceneView = SceneBlockRenderView.fromPortal(client, portal);
+        SceneBlockRenderView sceneView = sceneViewCache.computeIfAbsent(
+                portal.sceneName(),
+                sceneName -> SceneBlockRenderView.fromPortal(client, portal)
+        );
         Random random = Random.create();
+        PortalViewFrustum portalViewFrustum = PortalViewFrustum.of(camera, portal);
 
         int rendered = 0;
         for (PortalRenderBlock block : portal.renderBlocks()) {
@@ -379,7 +408,11 @@ public final class PortalSceneRenderer {
             // Block center = corner + (0.5, 0.5, 0.5) in world axes (no portal-axis dependency).
             Vec3d worldCenter = worldMin.add(0.5D, 0.5D, 0.5D);
 
-            if (squaredHorizontalDistance(camera, worldCenter) > MAX_BLOCK_RENDER_DISTANCE_SQ) {
+            if (squaredHorizontalDistance(camera, worldCenter) > maxBlockRenderDistanceSq) {
+                continue;
+            }
+
+            if (!portalViewFrustum.contains(worldCenter)) {
                 continue;
             }
 
@@ -592,10 +625,95 @@ public final class PortalSceneRenderer {
         return viewerSide * signedDistance <= PORTAL_FRONT_CLIP_EPSILON;
     }
 
+    private static double computeDynamicPortalBlockDistanceSq(int portalCount, int currentFps) {
+        double maxDistance = BASE_MAX_BLOCK_RENDER_DISTANCE;
+
+        if (portalCount >= 4) {
+            maxDistance = Math.min(maxDistance, 192.0D);
+        }
+        if (portalCount >= 8) {
+            maxDistance = Math.min(maxDistance, 128.0D);
+        }
+
+        if (currentFps > 0) {
+            if (currentFps < 45) {
+                maxDistance = Math.min(maxDistance, 160.0D);
+            }
+            if (currentFps < 30) {
+                maxDistance = Math.min(maxDistance, 112.0D);
+            }
+            if (currentFps < 20) {
+                maxDistance = Math.min(maxDistance, 72.0D);
+            }
+        }
+
+        return maxDistance * maxDistance;
+    }
+
     private static double squaredHorizontalDistance(Vec3d a, Vec3d b) {
         double dx = a.x - b.x;
         double dz = a.z - b.z;
         return dx * dx + dz * dz;
+    }
+
+    private static final class PortalViewFrustum {
+        private final Vec3d camera;
+        private final Vec3d[] sideNormals;
+        private final double[] sideSigns;
+
+        private PortalViewFrustum(Vec3d camera, Vec3d[] sideNormals, double[] sideSigns) {
+            this.camera = camera;
+            this.sideNormals = sideNormals;
+            this.sideSigns = sideSigns;
+        }
+
+        private static PortalViewFrustum of(Vec3d camera, PortalInstance portal) {
+            Vec3d halfRight = portal.right().multiply(portal.width() * 0.5D);
+            Vec3d halfUp = portal.up().multiply(portal.height() * 0.5D);
+
+            Vec3d bottomLeft = portal.center().subtract(halfRight).subtract(halfUp);
+            Vec3d bottomRight = portal.center().add(halfRight).subtract(halfUp);
+            Vec3d topRight = portal.center().add(halfRight).add(halfUp);
+            Vec3d topLeft = portal.center().subtract(halfRight).add(halfUp);
+            Vec3d[] corners = new Vec3d[]{bottomLeft, bottomRight, topRight, topLeft};
+
+            Vec3d[] normals = new Vec3d[4];
+            double[] signs = new double[4];
+            Vec3d centerDirection = portal.center().subtract(camera);
+
+            for (int i = 0; i < corners.length; i++) {
+                Vec3d from = corners[i].subtract(camera);
+                Vec3d to = corners[(i + 1) % corners.length].subtract(camera);
+                Vec3d normal = from.crossProduct(to);
+                double lenSq = normal.lengthSquared();
+                if (lenSq < 1.0E-9D) {
+                    normal = portal.normal();
+                } else {
+                    normal = normal.normalize();
+                }
+
+                double sign = Math.signum(normal.dotProduct(centerDirection));
+                if (sign == 0.0D) {
+                    sign = 1.0D;
+                }
+
+                normals[i] = normal;
+                signs[i] = sign;
+            }
+
+            return new PortalViewFrustum(camera, normals, signs);
+        }
+
+        private boolean contains(Vec3d point) {
+            Vec3d direction = point.subtract(camera);
+            for (int i = 0; i < sideNormals.length; i++) {
+                double sidedDistance = sideSigns[i] * sideNormals[i].dotProduct(direction);
+                if (sidedDistance < -FRUSTUM_CULL_EPSILON) {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 }
 

@@ -7,12 +7,14 @@ import padej.client.scene.SceneSnapshot;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 public final class PortalManager {
     private static final int MAX_RENDER_BLOCKS_PER_PORTAL = 12000;
     private static final double PORTAL_WIDTH = 3.0D;
     private static final double PORTAL_HEIGHT = 3.0D;
+    private static final double PORTAL_FORWARD_DISTANCE = 3.0D;
 
     private final List<PortalInstance> activePortals = new ArrayList<>();
     private final List<DebugPlaneInstance> debugPlanes = new ArrayList<>();
@@ -31,7 +33,8 @@ public final class PortalManager {
         Vec3d right = basis.right();
         Vec3d up = basis.up();
 
-        Vec3d center = player.getEyePos().add(normal.multiply(3.0D));
+        Vec3d desiredCenter = player.getEyePos().add(normal.multiply(PORTAL_FORWARD_DISTANCE));
+        Vec3d center = alignPortalCenterToBlockGrid(desiredCenter, normal);
         double eyeOffsetY = player.getEyeY() - player.getY();
         // Scene anchor = portal center. Blocks are placed at (center + relX, center + relY, center + relZ)
         // using world-space axes (east/up/south), so the scene is world-aligned regardless of portal facing.
@@ -59,6 +62,22 @@ public final class PortalManager {
         );
         activePortals.add(portal);
         return portal;
+    }
+
+    public Optional<PortalInstance> removeNearestPortal(Vec3d position) {
+        int index = findNearestPortalIndex(position, null);
+        if (index < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(activePortals.remove(index));
+    }
+
+    public Optional<PortalInstance> removePortalBySceneName(String sceneName, Vec3d position) {
+        int index = findNearestPortalIndex(position, sceneName);
+        if (index < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(activePortals.remove(index));
     }
 
     public DebugPlaneInstance createDebugPlane(ClientPlayerEntity player) {
@@ -114,6 +133,48 @@ public final class PortalManager {
     private static int distanceSq(SceneSnapshot.SceneBlock block) {
         // Prioritize by horizontal distance only (XZ). Y should not affect portal block selection order.
         return block.relX() * block.relX() + block.relZ() * block.relZ();
+    }
+
+    private static Vec3d alignPortalCenterToBlockGrid(Vec3d desiredCenter, Vec3d normal) {
+        // In-plane coordinates snap to block centers for clean grid alignment.
+        double x = Math.floor(desiredCenter.x) + 0.5D;
+        double y = Math.floor(desiredCenter.y) + 0.5D;
+        double z = Math.floor(desiredCenter.z) + 0.5D;
+
+        // Depth axis snaps to block-center offset in the facing direction (+/-0.5), like a nether portal plane.
+        if (Math.abs(normal.x) > 0.5D) {
+            x = Math.floor(desiredCenter.x) + 0.5D * Math.signum(normal.x);
+        } else if (Math.abs(normal.z) > 0.5D) {
+            z = Math.floor(desiredCenter.z) + 0.5D * Math.signum(normal.z);
+        }
+
+        return new Vec3d(x, y, z);
+    }
+
+    private int findNearestPortalIndex(Vec3d position, String requiredSceneName) {
+        int bestIndex = -1;
+        double bestDistanceSq = Double.POSITIVE_INFINITY;
+
+        for (int i = 0; i < activePortals.size(); i++) {
+            PortalInstance portal = activePortals.get(i);
+            if (requiredSceneName != null && !portal.sceneName().equals(requiredSceneName)) {
+                continue;
+            }
+
+            double distanceSq = squaredHorizontalDistance(position, portal.center());
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestIndex = i;
+            }
+        }
+
+        return bestIndex;
+    }
+
+    private static double squaredHorizontalDistance(Vec3d a, Vec3d b) {
+        double dx = a.x - b.x;
+        double dz = a.z - b.z;
+        return dx * dx + dz * dz;
     }
 
     private static PlaneBasis buildVerticalPlaneBasis(float yawDegrees) {

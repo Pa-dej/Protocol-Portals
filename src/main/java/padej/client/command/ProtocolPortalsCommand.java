@@ -38,6 +38,11 @@ public final class ProtocolPortalsCommand {
                                                 .executes(this::createPortal)))
                                 .then(ClientCommandManager.literal("debug-plane")
                                         .executes(this::createDebugPlane)))
+                        .then(ClientCommandManager.literal("remove")
+                                .then(ClientCommandManager.literal("portal")
+                                        .executes(this::removeNearestPortal)
+                                        .then(ClientCommandManager.argument("fileName", StringArgumentType.word())
+                                                .executes(this::removePortalByName))))
         ));
     }
 
@@ -111,6 +116,51 @@ public final class ProtocolPortalsCommand {
         source.sendFeedback(Text.literal("Debug plane created at "
                 + formatVec(plane.center().x, plane.center().y, plane.center().z)
                 + ", size 3x3."));
+        return 1;
+    }
+
+    private int removeNearestPortal(CommandContext<FabricClientCommandSource> context) {
+        FabricClientCommandSource source = context.getSource();
+        if (source.getClient().player == null) {
+            source.sendError(Text.literal("You must be in world to remove portal."));
+            return 0;
+        }
+
+        Optional<PortalInstance> removed = portalManager.removeNearestPortal(source.getClient().player.getPos());
+        if (removed.isEmpty()) {
+            source.sendError(Text.literal("No portals to remove."));
+            return 0;
+        }
+
+        PortalInstance portal = removed.get();
+        source.sendFeedback(Text.literal("Removed nearest portal for scene '" + portal.sceneName() + "' at "
+                + formatVec(portal.center().x, portal.center().y, portal.center().z)));
+        return 1;
+    }
+
+    private int removePortalByName(CommandContext<FabricClientCommandSource> context) {
+        FabricClientCommandSource source = context.getSource();
+        String fileName = StringArgumentType.getString(context, "fileName");
+        if (!sceneRepository.isValidFileName(fileName)) {
+            source.sendError(SceneRepository.invalidNameText(fileName));
+            return 0;
+        }
+
+        if (source.getClient().player == null) {
+            source.sendError(Text.literal("You must be in world to remove portal."));
+            return 0;
+        }
+
+        String sceneName = fileName.toLowerCase(Locale.ROOT);
+        Optional<PortalInstance> removed = portalManager.removePortalBySceneName(sceneName, source.getClient().player.getPos());
+        if (removed.isEmpty()) {
+            source.sendError(Text.literal("No portal found for scene '" + sceneName + "'."));
+            return 0;
+        }
+
+        PortalInstance portal = removed.get();
+        source.sendFeedback(Text.literal("Removed portal for scene '" + portal.sceneName() + "' at "
+                + formatVec(portal.center().x, portal.center().y, portal.center().z)));
         return 1;
     }
 

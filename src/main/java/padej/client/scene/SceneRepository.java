@@ -263,7 +263,8 @@ public final class SceneRepository {
             }
 
             neighborPos.set(nx, ny, nz);
-            if (world.getBlockState(neighborPos).isAir()) {
+            BlockState neighborState = world.getBlockState(neighborPos);
+            if (neighborState.isAir() || !neighborState.isOpaqueFullCube(world, neighborPos)) {
                 return true;
             }
         }
