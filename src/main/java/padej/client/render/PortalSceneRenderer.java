@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 
 public final class PortalSceneRenderer {
+    private static final int SCENE_SECTION_SIZE = 16;
     private static final int OUTER_STENCIL_VALUE = 0;
     private static final int THIS_PORTAL_STENCIL_VALUE = 1;
     private static final double MAX_PORTAL_RENDER_DISTANCE_SQ = 96.0D * 96.0D;
@@ -49,6 +50,7 @@ public final class PortalSceneRenderer {
     private static final double PORTAL_FRONT_CLIP_EPSILON = 1.0E-3D;
 
     private final PortalManager portalManager;
+    private final Map<SceneCacheKey, CachedScene> cachedScenes = new HashMap<>();
     private boolean stencilReadyThisFrame = false;
     private boolean stencilUnavailableLogged = false;
     private boolean fallbackModeLogged = false;
@@ -97,7 +99,6 @@ public final class PortalSceneRenderer {
         float tickDelta = context.tickCounter().getTickDelta(false);
         int currentFps = MinecraftClient.getInstance().getCurrentFps();
         double dynamicBlockRenderDistanceSq = computeDynamicPortalBlockDistanceSq(portals.size(), currentFps);
-        Map<String, SceneBlockRenderView> sceneViewCache = new HashMap<>();
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -109,8 +110,12 @@ public final class PortalSceneRenderer {
                 return;
             }
 
+            if (cachedScenes.size() > 128) {
+                cachedScenes.clear();
+            }
+
             if (!stencilReadyThisFrame) {
-                renderFallbackWithoutStencil(portals, camera, tickDelta, sceneViewCache, dynamicBlockRenderDistanceSq);
+                renderFallbackWithoutStencil(portals, camera, tickDelta, dynamicBlockRenderDistanceSq);
                 return;
             }
 
@@ -128,7 +133,7 @@ public final class PortalSceneRenderer {
                 }
 
                 clearDepthOfPortalViewArea(portal, matrix);
-                renderPortalContentInStencil(portal, camera, tickDelta, sceneViewCache, dynamicBlockRenderDistanceSq);
+                renderPortalContentInStencil(portal, camera, tickDelta, dynamicBlockRenderDistanceSq);
                 restoreDepthOfPortalViewArea(portal, matrix);
                 clampStencilValue(OUTER_STENCIL_VALUE);
             }
@@ -211,7 +216,6 @@ public final class PortalSceneRenderer {
             PortalInstance portal,
             Vec3d camera,
             float tickDelta,
-            Map<String, SceneBlockRenderView> sceneViewCache,
             double maxBlockRenderDistanceSq
     ) {
         RenderSystem.disableBlend();
@@ -225,7 +229,7 @@ public final class PortalSceneRenderer {
         // World-aligned mode: blocks are placed along world axes, not along portal normal,
         // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
         // The stencil + depth buffer together handle correct visibility - no plane clip needed.
-        renderPortalBlocks(portal, camera, false, tickDelta, sceneViewCache, maxBlockRenderDistanceSq);
+        renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
     }
 
     private void restoreDepthOfPortalViewArea(PortalInstance portal, Matrix4f matrix) {
@@ -347,7 +351,6 @@ public final class PortalSceneRenderer {
             List<PortalInstance> portals,
             Vec3d camera,
             float tickDelta,
-            Map<String, SceneBlockRenderView> sceneViewCache,
             double maxBlockRenderDistanceSq
     ) {
         RenderSystem.enableDepthTest();
@@ -363,7 +366,7 @@ public final class PortalSceneRenderer {
             if (!isPortalValidForRendering(portal, camera)) {
                 continue;
             }
-            renderPortalBlocks(portal, camera, false, tickDelta, sceneViewCache, maxBlockRenderDistanceSq);
+            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
         }
 
         MatrixStack overlayStack = new MatrixStack();
@@ -377,11 +380,15 @@ public final class PortalSceneRenderer {
             Vec3d camera,
             boolean clipAgainstPortalPlane,
             float tickDelta,
-            Map<String, SceneBlockRenderView> sceneViewCache,
             double maxBlockRenderDistanceSq
     ) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) {
+            return;
+        }
+
+        CachedScene cachedScene = getOrBuildCachedScene(client, portal);
+        if (cachedScene.sections().isEmpty()) {
             return;
         }
 
@@ -390,98 +397,83 @@ public final class PortalSceneRenderer {
         VertexConsumerProvider.Immediate vertexConsumers = client.getBufferBuilders().getEntityVertexConsumers();
         MatrixStack blockMatrices = new MatrixStack();
         blockMatrices.translate(-camera.x, -camera.y, -camera.z);
-        SceneBlockRenderView sceneView = sceneViewCache.computeIfAbsent(
-                portal.sceneName(),
-                sceneName -> SceneBlockRenderView.fromPortal(client, portal)
-        );
         Random random = Random.create();
-        Map<RenderLayer, List<QueuedPortalBlock>> batchedBlocks = new HashMap<>();
-        List<QueuedPortalBlock> blockEntitiesToRender = new ArrayList<>();
 
-        for (PortalRenderBlock block : portal.renderBlocks()) {
-            BlockState state = block.state();
-            if (state.isAir()) {
+        List<CachedSection> visibleSections = new ArrayList<>(cachedScene.sections().size());
+        for (CachedSection section : cachedScene.sections()) {
+            Vec3d sectionCenter = portal.sceneAnchor().add(section.localCenter());
+            if (squaredHorizontalDistance(camera, sectionCenter) > maxBlockRenderDistanceSq) {
                 continue;
             }
-
-            Vec3d localBlockPosition = block.localBlockPosition();
-            Vec3d worldMin = sceneBlockMin(portal, localBlockPosition);
-            // Block center = corner + (0.5, 0.5, 0.5) in world axes (no portal-axis dependency).
-            Vec3d worldCenter = worldMin.add(0.5D, 0.5D, 0.5D);
-
-            if (squaredHorizontalDistance(camera, worldCenter) > maxBlockRenderDistanceSq) {
+            if (clipAgainstPortalPlane && !isInPortalContentHalfSpace(portal, sectionCenter, camera)) {
                 continue;
             }
-
-            if (clipAgainstPortalPlane && !isInPortalContentHalfSpace(portal, worldCenter, camera)) {
-                continue;
-            }
-
-            BlockPos localPos = BlockPos.ofFloored(localBlockPosition);
-            QueuedPortalBlock queuedBlock = new QueuedPortalBlock(block, state, localPos, worldMin, block.packedLight());
-            batchedBlocks.computeIfAbsent(RenderLayers.getBlockLayer(state), unused -> new ArrayList<>()).add(queuedBlock);
-            if (state.hasBlockEntity()) {
-                blockEntitiesToRender.add(queuedBlock);
-            }
+            visibleSections.add(section);
         }
 
         int rendered = 0;
-        for (Map.Entry<RenderLayer, List<QueuedPortalBlock>> layerEntry : batchedBlocks.entrySet()) {
-            VertexConsumer layerConsumer = vertexConsumers.getBuffer(layerEntry.getKey());
-            for (QueuedPortalBlock queuedBlock : layerEntry.getValue()) {
-                random.setSeed(queuedBlock.state().getRenderingSeed(queuedBlock.localPos()));
+        for (CachedSection section : visibleSections) {
+            for (Map.Entry<RenderLayer, List<CachedPortalBlock>> layerEntry : section.blocksByLayer().entrySet()) {
+                VertexConsumer layerConsumer = vertexConsumers.getBuffer(layerEntry.getKey());
+                for (CachedPortalBlock cachedBlock : layerEntry.getValue()) {
+                    random.setSeed(cachedBlock.state().getRenderingSeed(cachedBlock.localPos()));
+                    blockMatrices.push();
+                    Vec3d worldMin = sceneBlockMin(portal, cachedBlock.localMin());
+                    blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
+                    blockRenderManager.renderBlock(
+                            cachedBlock.state(),
+                            cachedBlock.localPos(),
+                            cachedScene.sceneView(),
+                            blockMatrices,
+                            layerConsumer,
+                            true,
+                            random
+                    );
+                    blockMatrices.pop();
+                    rendered++;
+                }
+            }
+        }
+
+        int renderedBlockEntities = 0;
+        for (CachedSection section : visibleSections) {
+            for (CachedPortalBlock cachedBlock : section.blockEntities()) {
+                BlockState state = cachedBlock.state();
+                BlockEntity blockEntity = null;
+                if (state.getBlock() instanceof BlockEntityProvider provider) {
+                    blockEntity = provider.createBlockEntity(cachedBlock.localPos(), state);
+                }
+                if (blockEntity == null) {
+                    continue;
+                }
+
+                blockEntity.setWorld(client.world);
+                if (cachedBlock.source().blockEntityNbt() != null) {
+                    blockEntity.read(cachedBlock.source().blockEntityNbt().copy(), client.world.getRegistryManager());
+                }
+
+                BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
+                if (renderer == null) {
+                    continue;
+                }
+
                 blockMatrices.push();
-                Vec3d worldMin = queuedBlock.worldMin();
+                Vec3d worldMin = sceneBlockMin(portal, cachedBlock.localMin());
                 blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
-                blockRenderManager.renderBlock(
-                        queuedBlock.state(),
-                        queuedBlock.localPos(),
-                        sceneView,
+                renderer.render(
+                        blockEntity,
+                        tickDelta,
                         blockMatrices,
-                        layerConsumer,
-                        true,
-                        random
+                        vertexConsumers,
+                        cachedBlock.light(),
+                        OverlayTexture.DEFAULT_UV
                 );
                 blockMatrices.pop();
-                rendered++;
+                renderedBlockEntities++;
             }
         }
 
-        for (QueuedPortalBlock queuedBlock : blockEntitiesToRender) {
-            BlockState state = queuedBlock.state();
-            BlockEntity blockEntity = null;
-            if (state.getBlock() instanceof BlockEntityProvider provider) {
-                blockEntity = provider.createBlockEntity(queuedBlock.localPos(), state);
-            }
-            if (blockEntity == null) {
-                continue;
-            }
-
-            blockEntity.setWorld(client.world);
-            if (queuedBlock.source().blockEntityNbt() != null) {
-                blockEntity.read(queuedBlock.source().blockEntityNbt().copy(), client.world.getRegistryManager());
-            }
-
-            BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
-            if (renderer == null) {
-                continue;
-            }
-
-            blockMatrices.push();
-            Vec3d worldMin = queuedBlock.worldMin();
-            blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
-            renderer.render(
-                    blockEntity,
-                    tickDelta,
-                    blockMatrices,
-                    vertexConsumers,
-                    queuedBlock.light(),
-                    OverlayTexture.DEFAULT_UV
-            );
-            blockMatrices.pop();
-        }
-
-        if (rendered > 0 || !blockEntitiesToRender.isEmpty()) {
+        if (rendered > 0 || renderedBlockEntities > 0) {
             vertexConsumers.draw();
         }
     }
@@ -644,13 +636,56 @@ public final class PortalSceneRenderer {
         return viewerSide * signedDistance <= PORTAL_FRONT_CLIP_EPSILON;
     }
 
-    private record QueuedPortalBlock(
-            PortalRenderBlock source,
-            BlockState state,
-            BlockPos localPos,
-            Vec3d worldMin,
-            int light
-    ) {
+    private CachedScene getOrBuildCachedScene(MinecraftClient client, PortalInstance portal) {
+        SceneCacheKey key = SceneCacheKey.fromPortal(portal);
+        CachedScene cachedScene = cachedScenes.get(key);
+        if (cachedScene != null) {
+            return cachedScene;
+        }
+
+        CachedScene builtScene = buildCachedScene(client, portal);
+        cachedScenes.put(key, builtScene);
+        return builtScene;
+    }
+
+    private static CachedScene buildCachedScene(MinecraftClient client, PortalInstance portal) {
+        SceneBlockRenderView sceneView = SceneBlockRenderView.fromPortal(client, portal);
+        Map<Long, MutableSceneSection> sectionBuilders = new HashMap<>();
+
+        for (PortalRenderBlock block : portal.renderBlocks()) {
+            BlockState state = block.state();
+            if (state.isAir()) {
+                continue;
+            }
+
+            BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
+            int sectionX = Math.floorDiv(localPos.getX(), SCENE_SECTION_SIZE);
+            int sectionY = Math.floorDiv(localPos.getY(), SCENE_SECTION_SIZE);
+            int sectionZ = Math.floorDiv(localPos.getZ(), SCENE_SECTION_SIZE);
+            long sectionKey = BlockPos.asLong(sectionX, sectionY, sectionZ);
+
+            MutableSceneSection section = sectionBuilders.computeIfAbsent(
+                    sectionKey,
+                    unused -> new MutableSceneSection(sectionX, sectionY, sectionZ)
+            );
+
+            RenderLayer layer = RenderLayers.getBlockLayer(state);
+            CachedPortalBlock cachedBlock = new CachedPortalBlock(
+                    block,
+                    state,
+                    localPos,
+                    block.localBlockPosition(),
+                    block.packedLight()
+            );
+            section.add(layer, cachedBlock);
+        }
+
+        List<CachedSection> sections = new ArrayList<>(sectionBuilders.size());
+        for (MutableSceneSection section : sectionBuilders.values()) {
+            sections.add(section.build());
+        }
+
+        return new CachedScene(sceneView, sections);
     }
 
     private static double computeDynamicPortalBlockDistanceSq(int portalCount, int currentFps) {
@@ -682,6 +717,78 @@ public final class PortalSceneRenderer {
         double dx = a.x - b.x;
         double dz = a.z - b.z;
         return dx * dx + dz * dz;
+    }
+
+    private record SceneCacheKey(
+            String sceneName,
+            int blockCount,
+            int lightSampleCount,
+            int firstBlockHash,
+            int lastBlockHash
+    ) {
+        private static SceneCacheKey fromPortal(PortalInstance portal) {
+            List<PortalRenderBlock> blocks = portal.renderBlocks();
+            int firstHash = blocks.isEmpty() ? 0 : blocks.get(0).hashCode();
+            int lastHash = blocks.isEmpty() ? 0 : blocks.get(blocks.size() - 1).hashCode();
+            return new SceneCacheKey(
+                    portal.sceneName(),
+                    blocks.size(),
+                    portal.lightSamples().size(),
+                    firstHash,
+                    lastHash
+            );
+        }
+    }
+
+    private record CachedScene(
+            SceneBlockRenderView sceneView,
+            List<CachedSection> sections
+    ) {
+    }
+
+    private record CachedSection(
+            Vec3d localCenter,
+            Map<RenderLayer, List<CachedPortalBlock>> blocksByLayer,
+            List<CachedPortalBlock> blockEntities
+    ) {
+    }
+
+    private record CachedPortalBlock(
+            PortalRenderBlock source,
+            BlockState state,
+            BlockPos localPos,
+            Vec3d localMin,
+            int light
+    ) {
+    }
+
+    private static final class MutableSceneSection {
+        private final Vec3d localCenter;
+        private final Map<RenderLayer, List<CachedPortalBlock>> blocksByLayer = new HashMap<>();
+        private final List<CachedPortalBlock> blockEntities = new ArrayList<>();
+
+        private MutableSceneSection(int sectionX, int sectionY, int sectionZ) {
+            this.localCenter = new Vec3d(
+                    sectionX * SCENE_SECTION_SIZE + SCENE_SECTION_SIZE * 0.5D,
+                    sectionY * SCENE_SECTION_SIZE + SCENE_SECTION_SIZE * 0.5D,
+                    sectionZ * SCENE_SECTION_SIZE + SCENE_SECTION_SIZE * 0.5D
+            );
+        }
+
+        private void add(RenderLayer layer, CachedPortalBlock block) {
+            blocksByLayer.computeIfAbsent(layer, unused -> new ArrayList<>()).add(block);
+            if (block.state().hasBlockEntity()) {
+                blockEntities.add(block);
+            }
+        }
+
+        private CachedSection build() {
+            Map<RenderLayer, List<CachedPortalBlock>> builtLayers = new HashMap<>(blocksByLayer.size());
+            for (Map.Entry<RenderLayer, List<CachedPortalBlock>> entry : blocksByLayer.entrySet()) {
+                builtLayers.put(entry.getKey(), List.copyOf(entry.getValue()));
+            }
+            return new CachedSection(localCenter, builtLayers, List.copyOf(blockEntities));
+        }
     }
 }
 
