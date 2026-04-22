@@ -120,7 +120,7 @@ public final class PortalSceneRenderer {
             }
 
             if (!stencilReadyThisFrame) {
-                renderFallbackWithoutStencil(portals, camera, tickDelta, dynamicBlockRenderDistanceSq);
+                renderFallbackWithoutStencil(portals, camera, tickDelta, dynamicBlockRenderDistanceSq, matrix);
                 return;
             }
 
@@ -357,7 +357,8 @@ public final class PortalSceneRenderer {
             List<PortalInstance> portals,
             Vec3d camera,
             float tickDelta,
-            double maxBlockRenderDistanceSq
+            double maxBlockRenderDistanceSq,
+            Matrix4f viewMatrix
     ) {
         RenderSystem.enableDepthTest();
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
@@ -375,9 +376,7 @@ public final class PortalSceneRenderer {
             renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
         }
 
-        MatrixStack overlayStack = new MatrixStack();
-        overlayStack.translate(-camera.x, -camera.y, -camera.z);
-        drawPortalFrames(portals, overlayStack.peek().getPositionMatrix());
+        drawPortalFrames(portals, viewMatrix);
         RenderSystem.enableCull();
     }
 
@@ -405,29 +404,42 @@ public final class PortalSceneRenderer {
             return;
         }
 
-        Matrix4f modelMatrix = new Matrix4f().translation(
-                (float) (portal.sceneAnchor().x - camera.x),
-                (float) (portal.sceneAnchor().y - camera.y),
-                (float) (portal.sceneAnchor().z - camera.z)
-        );
-        Matrix4f projectionMatrix = new Matrix4f(RenderSystem.getProjectionMatrix());
+        float chunkOffsetX = (float) (portal.sceneAnchor().x - camera.x);
+        float chunkOffsetY = (float) (portal.sceneAnchor().y - camera.y);
+        float chunkOffsetZ = (float) (portal.sceneAnchor().z - camera.z);
 
         int renderedMeshes = 0;
         for (CachedLayerMesh mesh : cachedScene.meshes()) {
             mesh.layer().startDrawing();
-            mesh.vertexBuffer().bind();
             try {
                 ShaderProgram shader = RenderSystem.getShader();
-                if (shader != null) {
+                if (shader == null) {
+                    continue;
+                }
+
+                shader.initializeUniforms(
+                        mesh.layer().getDrawMode(),
+                        RenderSystem.getModelViewMatrix(),
+                        RenderSystem.getProjectionMatrix(),
+                        client.getWindow()
+                );
+                shader.bind();
+                try {
                     if (shader.chunkOffset != null) {
-                        shader.chunkOffset.set(0.0F, 0.0F, 0.0F);
+                        shader.chunkOffset.set(chunkOffsetX, chunkOffsetY, chunkOffsetZ);
                         shader.chunkOffset.upload();
                     }
-                    mesh.vertexBuffer().draw(modelMatrix, projectionMatrix, shader);
+                    mesh.vertexBuffer().bind();
+                    mesh.vertexBuffer().draw();
                     renderedMeshes++;
+                } finally {
+                    if (shader.chunkOffset != null) {
+                        shader.chunkOffset.set(0.0F, 0.0F, 0.0F);
+                    }
+                    shader.unbind();
+                    VertexBuffer.unbind();
                 }
             } finally {
-                VertexBuffer.unbind();
                 mesh.layer().endDrawing();
             }
         }
