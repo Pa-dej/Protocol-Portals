@@ -419,6 +419,10 @@ public final class PortalSceneRenderer {
             try {
                 ShaderProgram shader = RenderSystem.getShader();
                 if (shader != null) {
+                    if (shader.chunkOffset != null) {
+                        shader.chunkOffset.set(0.0F, 0.0F, 0.0F);
+                        shader.chunkOffset.upload();
+                    }
                     mesh.vertexBuffer().draw(modelMatrix, projectionMatrix, shader);
                     renderedMeshes++;
                 }
