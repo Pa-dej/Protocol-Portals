@@ -229,11 +229,15 @@ public final class PortalSceneRenderer {
         RenderSystem.colorMask(false, false, false, false);
         RenderSystem.depthMask(false);
         GL11.glStencilMask(0xFF);
-        GL11.glStencilFunc(GL11.GL_LESS, maxStencilValue, 0xFF);
-        GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_REPLACE, GL11.GL_REPLACE);
+        // Reset any nested/non-zero stencil values back to the outer layer.
+        // With multiple portals per frame this prevents one portal's mask from leaking into the next.
+        GL11.glStencilFunc(GL11.GL_GREATER, maxStencilValue, 0xFF);
+        GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_REPLACE);
         RenderSystem.disableDepthTest();
         drawScreenTriangle();
         RenderSystem.enableDepthTest();
+        GL11.glStencilFunc(GL11.GL_EQUAL, maxStencilValue, 0xFF);
+        GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
         RenderSystem.colorMask(true, true, true, true);
         RenderSystem.depthMask(true);
     }
