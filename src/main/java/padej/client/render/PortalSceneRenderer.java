@@ -152,21 +152,31 @@ public final class PortalSceneRenderer {
     }
 
     private boolean renderPortalViewAreaToStencilAndDecideVisibility(PortalInstance portal, Matrix4f matrix) {
-        RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
-        RenderSystem.colorMask(false, false, false, false);
-        RenderSystem.depthMask(false);
-        GL11.glStencilMask(0xFF);
-        GL11.glStencilFunc(GL11.GL_EQUAL, OUTER_STENCIL_VALUE, 0xFF);
-        GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_INCR);
+        boolean cullWasEnabled = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        if (cullWasEnabled) {
+            RenderSystem.disableCull();
+        }
+        try {
+            RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
+            RenderSystem.colorMask(false, false, false, false);
+            RenderSystem.depthMask(false);
+            GL11.glStencilMask(0xFF);
+            GL11.glStencilFunc(GL11.GL_EQUAL, OUTER_STENCIL_VALUE, 0xFF);
+            GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_INCR);
 
-        int queryId = GL15C.glGenQueries();
-        GL15C.glBeginQuery(GL33C.GL_ANY_SAMPLES_PASSED, queryId);
-        drawPortalPlaneQuad(portal, matrix, 255, 255, 255, 0);
-        GL15C.glEndQuery(GL33C.GL_ANY_SAMPLES_PASSED);
+            int queryId = GL15C.glGenQueries();
+            GL15C.glBeginQuery(GL33C.GL_ANY_SAMPLES_PASSED, queryId);
+            drawPortalPlaneQuad(portal, matrix, 255, 255, 255, 0);
+            GL15C.glEndQuery(GL33C.GL_ANY_SAMPLES_PASSED);
 
-        int samplesPassed = GL15C.glGetQueryObjecti(queryId, GL15C.GL_QUERY_RESULT);
-        GL15C.glDeleteQueries(queryId);
-        return samplesPassed != 0;
+            int samplesPassed = GL15C.glGetQueryObjecti(queryId, GL15C.GL_QUERY_RESULT);
+            GL15C.glDeleteQueries(queryId);
+            return samplesPassed != 0;
+        } finally {
+            if (cullWasEnabled) {
+                RenderSystem.enableCull();
+            }
+        }
     }
 
     private void clearDepthOfPortalViewArea(PortalInstance portal, Matrix4f matrix) {
@@ -195,7 +205,8 @@ public final class PortalSceneRenderer {
         BufferBuilder quads = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
         int rendered = 0;
         for (PortalRenderBlock block : portal.renderBlocks()) {
-            Vec3d worldMin = sceneBlockMin(portal, block.localBlockPosition());
+            Vec3d localBlockPosition = block.localBlockPosition();
+            Vec3d worldMin = sceneBlockMin(portal, localBlockPosition);
             Vec3d worldCenter = worldMin
                     .add(portal.right().multiply(0.5D))
                     .add(portal.up().multiply(0.5D))
@@ -205,9 +216,9 @@ public final class PortalSceneRenderer {
                 continue;
             }
 
-            int bx = (int) block.localBlockPosition().x;
-            int by = (int) block.localBlockPosition().y;
-            int bz = (int) block.localBlockPosition().z;
+            int bx = (int) localBlockPosition.x;
+            int by = (int) localBlockPosition.y;
+            int bz = (int) localBlockPosition.z;
             addExposedCubeFaces(
                     quads, matrix, worldMin, portal.right(), portal.up(), portal.normal(),
                     bx, by, bz, occupied,
@@ -322,7 +333,8 @@ public final class PortalSceneRenderer {
 
             Set<Long> occupied = buildOccupiedSet(portal);
             for (PortalRenderBlock block : portal.renderBlocks()) {
-                Vec3d worldMin = sceneBlockMin(portal, block.localBlockPosition());
+                Vec3d localBlockPosition = block.localBlockPosition();
+                Vec3d worldMin = sceneBlockMin(portal, localBlockPosition);
                 Vec3d worldCenter = worldMin
                         .add(portal.right().multiply(0.5D))
                         .add(portal.up().multiply(0.5D))
@@ -332,9 +344,9 @@ public final class PortalSceneRenderer {
                     continue;
                 }
 
-                int bx = (int) block.localBlockPosition().x;
-                int by = (int) block.localBlockPosition().y;
-                int bz = (int) block.localBlockPosition().z;
+                int bx = (int) localBlockPosition.x;
+                int by = (int) localBlockPosition.y;
+                int bz = (int) localBlockPosition.z;
                 addExposedCubeFaces(
                         quads, matrix, worldMin, portal.right(), portal.up(), portal.normal(),
                         bx, by, bz, occupied,
@@ -534,6 +546,22 @@ public final class PortalSceneRenderer {
             int blue,
             int alpha
     ) {
+        int topRed = red;
+        int topGreen = green;
+        int topBlue = blue;
+
+        int bottomRed = scaleChannel(red, 0.45F);
+        int bottomGreen = scaleChannel(green, 0.45F);
+        int bottomBlue = scaleChannel(blue, 0.45F);
+
+        int sideXRed = scaleChannel(red, 0.72F);
+        int sideXGreen = scaleChannel(green, 0.72F);
+        int sideXBlue = scaleChannel(blue, 0.72F);
+
+        int sideZRed = scaleChannel(red, 0.62F);
+        int sideZGreen = scaleChannel(green, 0.62F);
+        int sideZBlue = scaleChannel(blue, 0.62F);
+
         Vec3d p000 = min;
         Vec3d p100 = min.add(right);
         Vec3d p010 = min.add(up);
@@ -544,22 +572,22 @@ public final class PortalSceneRenderer {
         Vec3d p111 = min.add(right).add(up).add(forward);
 
         if (!occupied.contains(localKey(x, y + 1, z))) {
-            addQuad(quads, matrix, p010, p011, p111, p110, red, green, blue, alpha);
+            addQuad(quads, matrix, p010, p011, p111, p110, topRed, topGreen, topBlue, alpha);
         }
         if (!occupied.contains(localKey(x, y - 1, z))) {
-            addQuad(quads, matrix, p000, p100, p101, p001, red, green, blue, alpha);
+            addQuad(quads, matrix, p000, p100, p101, p001, bottomRed, bottomGreen, bottomBlue, alpha);
         }
         if (!occupied.contains(localKey(x + 1, y, z))) {
-            addQuad(quads, matrix, p100, p110, p111, p101, red, green, blue, alpha);
+            addQuad(quads, matrix, p100, p110, p111, p101, sideXRed, sideXGreen, sideXBlue, alpha);
         }
         if (!occupied.contains(localKey(x - 1, y, z))) {
-            addQuad(quads, matrix, p000, p001, p011, p010, red, green, blue, alpha);
+            addQuad(quads, matrix, p000, p001, p011, p010, sideXRed, sideXGreen, sideXBlue, alpha);
         }
         if (!occupied.contains(localKey(x, y, z + 1))) {
-            addQuad(quads, matrix, p001, p101, p111, p011, red, green, blue, alpha);
+            addQuad(quads, matrix, p001, p101, p111, p011, sideZRed, sideZGreen, sideZBlue, alpha);
         }
         if (!occupied.contains(localKey(x, y, z - 1))) {
-            addQuad(quads, matrix, p000, p010, p110, p100, red, green, blue, alpha);
+            addQuad(quads, matrix, p000, p010, p110, p100, sideZRed, sideZGreen, sideZBlue, alpha);
         }
     }
 
@@ -616,5 +644,13 @@ public final class PortalSceneRenderer {
 
     private static long localKey(int x, int y, int z) {
         return BlockPos.asLong(x, y, z);
+    }
+
+    private static int scaleChannel(int value, float factor) {
+        int scaled = Math.round(value * factor);
+        if (scaled < 0) {
+            return 0;
+        }
+        return Math.min(scaled, 255);
     }
 }

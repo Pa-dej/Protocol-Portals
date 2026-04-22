@@ -36,11 +36,11 @@ public final class PortalManager {
         Vec3d up = basis.up();
 
         Vec3d center = player.getEyePos().add(normal.multiply(3.0D));
-        // Snapshot center (0,0,0) must match the center of portal lower edge.
-        // Small forward offset avoids z-fighting exactly on the portal plane.
+        // Snapshot origin is anchored to the lower portal edge with a tiny forward bias
+        // so scene cubes do not z-fight with the portal plane.
         Vec3d sceneAnchor = center
                 .subtract(up.multiply(PORTAL_HEIGHT * 0.5D))
-                .add(normal.multiply(0.5D));
+                .add(normal.multiply(0.01D));
 
         List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
         PortalInstance portal = new PortalInstance(
