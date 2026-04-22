@@ -4,6 +4,8 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.BlockEntityProvider;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.client.gl.ShaderProgram;
@@ -11,15 +13,17 @@ import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.OverlayTexture;
+import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.Tessellator;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
-import net.minecraft.client.render.WorldRenderer;
 import net.minecraft.client.render.block.BlockRenderManager;
+import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.random.Random;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15C;
@@ -86,6 +90,7 @@ public final class PortalSceneRenderer {
         }
 
         Vec3d camera = context.camera().getPos();
+        float tickDelta = context.tickCounter().getTickDelta(false);
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -98,7 +103,7 @@ public final class PortalSceneRenderer {
             }
 
             if (!stencilReadyThisFrame) {
-                renderFallbackWithoutStencil(portals, camera);
+                renderFallbackWithoutStencil(portals, camera, tickDelta);
                 return;
             }
 
@@ -116,7 +121,7 @@ public final class PortalSceneRenderer {
                 }
 
                 clearDepthOfPortalViewArea(portal, matrix);
-                renderPortalContentInStencil(portal, camera);
+                renderPortalContentInStencil(portal, camera, tickDelta);
                 restoreDepthOfPortalViewArea(portal, matrix);
                 clampStencilValue(OUTER_STENCIL_VALUE);
             }
@@ -195,7 +200,7 @@ public final class PortalSceneRenderer {
         GL11.glDepthRange(0.0D, 1.0D);
     }
 
-    private void renderPortalContentInStencil(PortalInstance portal, Vec3d camera) {
+    private void renderPortalContentInStencil(PortalInstance portal, Vec3d camera, float tickDelta) {
         RenderSystem.disableBlend();
         RenderSystem.colorMask(true, true, true, true);
         RenderSystem.depthMask(true);
@@ -204,7 +209,10 @@ public final class PortalSceneRenderer {
         GL11.glStencilFunc(GL11.GL_EQUAL, THIS_PORTAL_STENCIL_VALUE, 0xFF);
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
 
-        renderPortalBlocks(portal, camera, true);
+        // World-aligned mode: blocks are placed along world axes, not along portal normal,
+        // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
+        // The stencil + depth buffer together handle correct visibility - no plane clip needed.
+        renderPortalBlocks(portal, camera, false, tickDelta);
     }
 
     private void restoreDepthOfPortalViewArea(PortalInstance portal, Matrix4f matrix) {
@@ -318,7 +326,7 @@ public final class PortalSceneRenderer {
         RenderSystem.enableCull();
     }
 
-    private void renderFallbackWithoutStencil(List<PortalInstance> portals, Vec3d camera) {
+    private void renderFallbackWithoutStencil(List<PortalInstance> portals, Vec3d camera, float tickDelta) {
         RenderSystem.enableDepthTest();
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         RenderSystem.disableCull();
@@ -332,7 +340,7 @@ public final class PortalSceneRenderer {
             if (!isPortalValidForRendering(portal, camera)) {
                 continue;
             }
-            renderPortalBlocks(portal, camera, false);
+            renderPortalBlocks(portal, camera, false, tickDelta);
         }
 
         MatrixStack overlayStack = new MatrixStack();
@@ -341,16 +349,19 @@ public final class PortalSceneRenderer {
         RenderSystem.enableCull();
     }
 
-    private void renderPortalBlocks(PortalInstance portal, Vec3d camera, boolean clipAgainstPortalPlane) {
+    private void renderPortalBlocks(PortalInstance portal, Vec3d camera, boolean clipAgainstPortalPlane, float tickDelta) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) {
             return;
         }
 
         BlockRenderManager blockRenderManager = client.getBlockRenderManager();
+        var blockEntityRenderDispatcher = client.getBlockEntityRenderDispatcher();
         VertexConsumerProvider.Immediate vertexConsumers = client.getBufferBuilders().getEntityVertexConsumers();
         MatrixStack blockMatrices = new MatrixStack();
         blockMatrices.translate(-camera.x, -camera.y, -camera.z);
+        SceneBlockRenderView sceneView = SceneBlockRenderView.fromPortal(client, portal);
+        Random random = Random.create();
 
         int rendered = 0;
         for (PortalRenderBlock block : portal.renderBlocks()) {
@@ -361,10 +372,8 @@ public final class PortalSceneRenderer {
 
             Vec3d localBlockPosition = block.localBlockPosition();
             Vec3d worldMin = sceneBlockMin(portal, localBlockPosition);
-            Vec3d worldCenter = worldMin
-                    .add(portal.right().multiply(0.5D))
-                    .add(portal.up().multiply(0.5D))
-                    .add(portal.normal().multiply(0.5D));
+            // Block center = corner + (0.5, 0.5, 0.5) in world axes (no portal-axis dependency).
+            Vec3d worldCenter = worldMin.add(0.5D, 0.5D, 0.5D);
 
             if (camera.squaredDistanceTo(worldCenter) > MAX_BLOCK_RENDER_DISTANCE_SQ) {
                 continue;
@@ -374,18 +383,44 @@ public final class PortalSceneRenderer {
                 continue;
             }
 
-            BlockPos lightPos = BlockPos.ofFloored(worldCenter);
-            int light = WorldRenderer.getLightmapCoordinates(client.world, lightPos);
+            BlockPos localPos = BlockPos.ofFloored(localBlockPosition);
+            int light = block.packedLight();
+            random.setSeed(state.getRenderingSeed(localPos));
 
             blockMatrices.push();
             blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
-            blockRenderManager.renderBlockAsEntity(
+            blockRenderManager.renderBlock(
                     state,
+                    localPos,
+                    sceneView,
                     blockMatrices,
-                    vertexConsumers,
-                    light,
-                    OverlayTexture.DEFAULT_UV
+                    vertexConsumers.getBuffer(RenderLayers.getBlockLayer(state)),
+                    true,
+                    random
             );
+            if (state.hasBlockEntity()) {
+                BlockEntity blockEntity = null;
+                if (state.getBlock() instanceof BlockEntityProvider provider) {
+                    blockEntity = provider.createBlockEntity(localPos, state);
+                }
+                if (blockEntity != null) {
+                    blockEntity.setWorld(client.world);
+                    if (block.blockEntityNbt() != null) {
+                        blockEntity.read(block.blockEntityNbt().copy(), client.world.getRegistryManager());
+                    }
+                    BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
+                    if (renderer != null) {
+                        renderer.render(
+                                blockEntity,
+                                tickDelta,
+                                blockMatrices,
+                                vertexConsumers,
+                                light,
+                                OverlayTexture.DEFAULT_UV
+                        );
+                    }
+                }
+            }
             blockMatrices.pop();
             rendered++;
         }
@@ -439,10 +474,9 @@ public final class PortalSceneRenderer {
     }
 
     private static Vec3d sceneBlockMin(PortalInstance portal, Vec3d localBlockPosition) {
-        return portal.sceneAnchor()
-                .add(portal.right().multiply(localBlockPosition.x))
-                .add(portal.up().multiply(localBlockPosition.y))
-                .add(portal.normal().multiply(localBlockPosition.z));
+        // World-aligned: relX = east (+X), relY = up (+Y), relZ = south (+Z).
+        // sceneAnchor is the portal center, so blocks appear at their true world-relative offsets.
+        return portal.sceneAnchor().add(localBlockPosition);
     }
 
     private static void drawPortalPlaneQuad(PortalInstance portal, Matrix4f matrix, int red, int green, int blue, int alpha) {
@@ -545,8 +579,7 @@ public final class PortalSceneRenderer {
     }
 
     private static boolean isInPortalContentHalfSpace(PortalInstance portal, Vec3d point, Vec3d camera) {
-        // Choose clipping half-space from the viewer side so the portal is visible from both sides.
-        // This keeps geometry behind the portal plane relative to the current camera.
+        // Choose clipping half-space from viewer side so portal remains visible from both sides.
         double viewerSide = camera.subtract(portal.center()).dotProduct(portal.normal());
         double signedDistance = point.subtract(portal.center()).dotProduct(portal.normal());
         if (Math.abs(viewerSide) <= PORTAL_FRONT_CLIP_EPSILON) {
@@ -555,3 +588,4 @@ public final class PortalSceneRenderer {
         return viewerSide * signedDistance <= PORTAL_FRONT_CLIP_EPSILON;
     }
 }
+

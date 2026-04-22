@@ -2,6 +2,7 @@ package padej.client.scene;
 
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
 import net.minecraft.nbt.NbtIo;
@@ -21,7 +22,7 @@ import java.util.Map;
 import java.util.Optional;
 
 public final class SceneSnapshotIO {
-    private static final int FORMAT_VERSION = 1;
+    private static final int FORMAT_VERSION = 2;
 
     private SceneSnapshotIO() {
     }
@@ -53,6 +54,10 @@ public final class SceneSnapshotIO {
             blockNbt.putInt("y", block.relY());
             blockNbt.putInt("z", block.relZ());
             blockNbt.putInt("p", index);
+            blockNbt.putInt("l", block.packedLight());
+            if (block.blockEntityNbt() != null) {
+                blockNbt.put("be", block.blockEntityNbt().copy());
+            }
             blocks.add(blockNbt);
         }
 
@@ -68,7 +73,7 @@ public final class SceneSnapshotIO {
         }
 
         int version = root.getInt("format");
-        if (version != FORMAT_VERSION) {
+        if (version != 1 && version != FORMAT_VERSION) {
             throw new IOException("Unsupported scene format version: " + version);
         }
 
@@ -96,11 +101,20 @@ public final class SceneSnapshotIO {
                 continue;
             }
 
+            int packedLight = version >= 2 && blockNbt.contains("l", NbtElement.INT_TYPE)
+                    ? blockNbt.getInt("l")
+                    : LightmapTextureManager.MAX_LIGHT_COORDINATE;
+            NbtCompound blockEntityNbt = version >= 2 && blockNbt.contains("be", NbtElement.COMPOUND_TYPE)
+                    ? blockNbt.getCompound("be").copy()
+                    : null;
+
             blocks.add(new SceneSnapshot.SceneBlock(
                     blockNbt.getInt("x"),
                     blockNbt.getInt("y"),
                     blockNbt.getInt("z"),
-                    palette.get(palettePointer)
+                    palette.get(palettePointer),
+                    packedLight,
+                    blockEntityNbt
             ));
         }
 

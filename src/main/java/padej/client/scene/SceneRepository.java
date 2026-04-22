@@ -2,11 +2,15 @@ package padej.client.scene;
 
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.world.ClientWorld;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.LightType;
 import net.minecraft.world.chunk.WorldChunk;
 
 import java.io.IOException;
@@ -100,7 +104,8 @@ public final class SceneRepository {
         int maxChunkZ = Math.floorDiv(maxZ, 16);
 
         List<SceneSnapshot.SceneBlock> blocks = new ArrayList<>();
-        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
+        BlockPos.Mutable mutableChunkPos = new BlockPos.Mutable();
+        BlockPos.Mutable mutableWorldPos = new BlockPos.Mutable();
         boolean truncated = false;
 
         captureLoop:
@@ -128,15 +133,32 @@ public final class SceneRepository {
                         int relX = worldX - centerX;
                         for (int worldZ = startZ; worldZ <= endZ; worldZ++) {
                             int localZ = worldZ - chunkStartZ;
-                            mutablePos.set(localX, y, localZ);
-                            BlockState state = chunk.getBlockState(mutablePos);
+                            mutableChunkPos.set(localX, y, localZ);
+                            BlockState state = chunk.getBlockState(mutableChunkPos);
                             if (state.isAir()) {
                                 continue;
                             }
 
+                            mutableWorldPos.set(worldX, y, worldZ);
+                            int blockLight = world.getLightLevel(LightType.BLOCK, mutableWorldPos);
+                            int skyLight = world.getLightLevel(LightType.SKY, mutableWorldPos);
+                            int packedLight = LightmapTextureManager.pack(blockLight, skyLight);
+
+                            BlockEntity blockEntity = world.getBlockEntity(mutableWorldPos);
+                            NbtCompound blockEntityNbt = blockEntity != null
+                                    ? blockEntity.createNbt(world.getRegistryManager())
+                                    : null;
+
                             int relY = y - centerY;
                             int relZ = worldZ - centerZ;
-                            blocks.add(new SceneSnapshot.SceneBlock(relX, relY, relZ, state));
+                            blocks.add(new SceneSnapshot.SceneBlock(
+                                    relX,
+                                    relY,
+                                    relZ,
+                                    state,
+                                    packedLight,
+                                    blockEntityNbt
+                            ));
                             if (blocks.size() >= MAX_CAPTURED_BLOCKS) {
                                 truncated = true;
                                 break captureLoop;

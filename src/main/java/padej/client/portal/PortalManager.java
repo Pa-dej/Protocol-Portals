@@ -32,11 +32,10 @@ public final class PortalManager {
         Vec3d up = basis.up();
 
         Vec3d center = player.getEyePos().add(normal.multiply(3.0D));
-        // Snapshot origin is anchored to the lower portal edge with a tiny forward bias
-        // so scene cubes do not z-fight with the portal plane.
-        Vec3d sceneAnchor = center
-                .subtract(up.multiply(PORTAL_HEIGHT * 0.5D))
-                .add(normal.multiply(0.01D));
+        // Scene anchor = portal center. Blocks are placed at (center + relX, center + relY, center + relZ)
+        // using world-space axes (east/up/south), so the scene is world-aligned regardless of portal facing.
+        // Tiny bias along portal normal so blocks don't z-fight with the portal plane itself.
+        Vec3d sceneAnchor = center.add(normal.multiply(0.01D));
 
         List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
         PortalInstance portal = new PortalInstance(
@@ -75,36 +74,19 @@ public final class PortalManager {
     private List<PortalRenderBlock> prepareRenderBlocks(SceneSnapshot snapshot) {
         List<SceneSnapshot.SceneBlock> sorted = new ArrayList<>(snapshot.blocks());
         sorted.sort(Comparator.comparingInt(PortalManager::distanceSq));
-        int quarterTurns = Math.floorMod(Math.round(snapshot.captureYaw() / 90.0F), 4);
 
+        // World-aligned mode: no rotation applied - blocks keep their original world-relative
+        // positions (relX = east offset, relY = up offset, relZ = south offset).
+        // BlockState is also not rotated since the scene is shown in its original orientation.
         List<PortalRenderBlock> out = new ArrayList<>(Math.min(MAX_RENDER_BLOCKS_PER_PORTAL, sorted.size()));
         for (int i = 0; i < sorted.size() && i < MAX_RENDER_BLOCKS_PER_PORTAL; i++) {
             SceneSnapshot.SceneBlock block = sorted.get(i);
-
-            int x = block.relX();
-            int z = block.relZ();
-            int rotatedX;
-            int rotatedZ;
-            switch (quarterTurns) {
-                case 1 -> {
-                    rotatedX = -z;
-                    rotatedZ = x;
-                }
-                case 2 -> {
-                    rotatedX = -x;
-                    rotatedZ = -z;
-                }
-                case 3 -> {
-                    rotatedX = z;
-                    rotatedZ = -x;
-                }
-                default -> {
-                    rotatedX = x;
-                    rotatedZ = z;
-                }
-            }
-
-            out.add(new PortalRenderBlock(new Vec3d(rotatedX, block.relY(), rotatedZ), block.state()));
+            out.add(new PortalRenderBlock(
+                    new Vec3d(block.relX(), block.relY(), block.relZ()),
+                    block.state(),
+                    block.packedLight(),
+                    block.blockEntityNbt()
+            ));
         }
         return out;
     }
@@ -137,3 +119,4 @@ public final class PortalManager {
     private record PlaneBasis(Vec3d normal, Vec3d right, Vec3d up) {
     }
 }
+

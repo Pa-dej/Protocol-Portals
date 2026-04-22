@@ -1,6 +1,8 @@
 package padej.client.scene;
 
 import net.minecraft.block.BlockState;
+import net.minecraft.nbt.NbtCompound;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
 
@@ -59,6 +61,16 @@ public final class SceneSnapshot {
         return blocks;
     }
 
-    public record SceneBlock(int relX, int relY, int relZ, BlockState state) {
+    public record SceneBlock(
+            int relX,
+            int relY,
+            int relZ,
+            BlockState state,
+            int packedLight,
+            @Nullable NbtCompound blockEntityNbt
+    ) {
+        public SceneBlock {
+            blockEntityNbt = blockEntityNbt == null ? null : blockEntityNbt.copy();
+        }
     }
 }
