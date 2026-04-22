@@ -13,8 +13,10 @@ import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.OverlayTexture;
+import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
@@ -45,7 +47,6 @@ public final class PortalSceneRenderer {
     private static final double MAX_PORTAL_RENDER_DISTANCE_SQ = 96.0D * 96.0D;
     private static final double BASE_MAX_BLOCK_RENDER_DISTANCE = 256.0D;
     private static final double PORTAL_FRONT_CLIP_EPSILON = 1.0E-3D;
-    private static final double FRUSTUM_CULL_EPSILON = 1.0E-4D;
 
     private final PortalManager portalManager;
     private boolean stencilReadyThisFrame = false;
@@ -394,9 +395,9 @@ public final class PortalSceneRenderer {
                 sceneName -> SceneBlockRenderView.fromPortal(client, portal)
         );
         Random random = Random.create();
-        PortalViewFrustum portalViewFrustum = PortalViewFrustum.of(camera, portal);
+        Map<RenderLayer, List<QueuedPortalBlock>> batchedBlocks = new HashMap<>();
+        List<QueuedPortalBlock> blockEntitiesToRender = new ArrayList<>();
 
-        int rendered = 0;
         for (PortalRenderBlock block : portal.renderBlocks()) {
             BlockState state = block.state();
             if (state.isAir()) {
@@ -412,57 +413,75 @@ public final class PortalSceneRenderer {
                 continue;
             }
 
-            if (!portalViewFrustum.contains(worldCenter)) {
-                continue;
-            }
-
             if (clipAgainstPortalPlane && !isInPortalContentHalfSpace(portal, worldCenter, camera)) {
                 continue;
             }
 
             BlockPos localPos = BlockPos.ofFloored(localBlockPosition);
-            int light = block.packedLight();
-            random.setSeed(state.getRenderingSeed(localPos));
-
-            blockMatrices.push();
-            blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
-            blockRenderManager.renderBlock(
-                    state,
-                    localPos,
-                    sceneView,
-                    blockMatrices,
-                    vertexConsumers.getBuffer(RenderLayers.getBlockLayer(state)),
-                    true,
-                    random
-            );
+            QueuedPortalBlock queuedBlock = new QueuedPortalBlock(block, state, localPos, worldMin, block.packedLight());
+            batchedBlocks.computeIfAbsent(RenderLayers.getBlockLayer(state), unused -> new ArrayList<>()).add(queuedBlock);
             if (state.hasBlockEntity()) {
-                BlockEntity blockEntity = null;
-                if (state.getBlock() instanceof BlockEntityProvider provider) {
-                    blockEntity = provider.createBlockEntity(localPos, state);
-                }
-                if (blockEntity != null) {
-                    blockEntity.setWorld(client.world);
-                    if (block.blockEntityNbt() != null) {
-                        blockEntity.read(block.blockEntityNbt().copy(), client.world.getRegistryManager());
-                    }
-                    BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
-                    if (renderer != null) {
-                        renderer.render(
-                                blockEntity,
-                                tickDelta,
-                                blockMatrices,
-                                vertexConsumers,
-                                light,
-                                OverlayTexture.DEFAULT_UV
-                        );
-                    }
-                }
+                blockEntitiesToRender.add(queuedBlock);
             }
-            blockMatrices.pop();
-            rendered++;
         }
 
-        if (rendered > 0) {
+        int rendered = 0;
+        for (Map.Entry<RenderLayer, List<QueuedPortalBlock>> layerEntry : batchedBlocks.entrySet()) {
+            VertexConsumer layerConsumer = vertexConsumers.getBuffer(layerEntry.getKey());
+            for (QueuedPortalBlock queuedBlock : layerEntry.getValue()) {
+                random.setSeed(queuedBlock.state().getRenderingSeed(queuedBlock.localPos()));
+                blockMatrices.push();
+                Vec3d worldMin = queuedBlock.worldMin();
+                blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
+                blockRenderManager.renderBlock(
+                        queuedBlock.state(),
+                        queuedBlock.localPos(),
+                        sceneView,
+                        blockMatrices,
+                        layerConsumer,
+                        true,
+                        random
+                );
+                blockMatrices.pop();
+                rendered++;
+            }
+        }
+
+        for (QueuedPortalBlock queuedBlock : blockEntitiesToRender) {
+            BlockState state = queuedBlock.state();
+            BlockEntity blockEntity = null;
+            if (state.getBlock() instanceof BlockEntityProvider provider) {
+                blockEntity = provider.createBlockEntity(queuedBlock.localPos(), state);
+            }
+            if (blockEntity == null) {
+                continue;
+            }
+
+            blockEntity.setWorld(client.world);
+            if (queuedBlock.source().blockEntityNbt() != null) {
+                blockEntity.read(queuedBlock.source().blockEntityNbt().copy(), client.world.getRegistryManager());
+            }
+
+            BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
+            if (renderer == null) {
+                continue;
+            }
+
+            blockMatrices.push();
+            Vec3d worldMin = queuedBlock.worldMin();
+            blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
+            renderer.render(
+                    blockEntity,
+                    tickDelta,
+                    blockMatrices,
+                    vertexConsumers,
+                    queuedBlock.light(),
+                    OverlayTexture.DEFAULT_UV
+            );
+            blockMatrices.pop();
+        }
+
+        if (rendered > 0 || !blockEntitiesToRender.isEmpty()) {
             vertexConsumers.draw();
         }
     }
@@ -625,6 +644,15 @@ public final class PortalSceneRenderer {
         return viewerSide * signedDistance <= PORTAL_FRONT_CLIP_EPSILON;
     }
 
+    private record QueuedPortalBlock(
+            PortalRenderBlock source,
+            BlockState state,
+            BlockPos localPos,
+            Vec3d worldMin,
+            int light
+    ) {
+    }
+
     private static double computeDynamicPortalBlockDistanceSq(int portalCount, int currentFps) {
         double maxDistance = BASE_MAX_BLOCK_RENDER_DISTANCE;
 
@@ -654,66 +682,6 @@ public final class PortalSceneRenderer {
         double dx = a.x - b.x;
         double dz = a.z - b.z;
         return dx * dx + dz * dz;
-    }
-
-    private static final class PortalViewFrustum {
-        private final Vec3d camera;
-        private final Vec3d[] sideNormals;
-        private final double[] sideSigns;
-
-        private PortalViewFrustum(Vec3d camera, Vec3d[] sideNormals, double[] sideSigns) {
-            this.camera = camera;
-            this.sideNormals = sideNormals;
-            this.sideSigns = sideSigns;
-        }
-
-        private static PortalViewFrustum of(Vec3d camera, PortalInstance portal) {
-            Vec3d halfRight = portal.right().multiply(portal.width() * 0.5D);
-            Vec3d halfUp = portal.up().multiply(portal.height() * 0.5D);
-
-            Vec3d bottomLeft = portal.center().subtract(halfRight).subtract(halfUp);
-            Vec3d bottomRight = portal.center().add(halfRight).subtract(halfUp);
-            Vec3d topRight = portal.center().add(halfRight).add(halfUp);
-            Vec3d topLeft = portal.center().subtract(halfRight).add(halfUp);
-            Vec3d[] corners = new Vec3d[]{bottomLeft, bottomRight, topRight, topLeft};
-
-            Vec3d[] normals = new Vec3d[4];
-            double[] signs = new double[4];
-            Vec3d centerDirection = portal.center().subtract(camera);
-
-            for (int i = 0; i < corners.length; i++) {
-                Vec3d from = corners[i].subtract(camera);
-                Vec3d to = corners[(i + 1) % corners.length].subtract(camera);
-                Vec3d normal = from.crossProduct(to);
-                double lenSq = normal.lengthSquared();
-                if (lenSq < 1.0E-9D) {
-                    normal = portal.normal();
-                } else {
-                    normal = normal.normalize();
-                }
-
-                double sign = Math.signum(normal.dotProduct(centerDirection));
-                if (sign == 0.0D) {
-                    sign = 1.0D;
-                }
-
-                normals[i] = normal;
-                signs[i] = sign;
-            }
-
-            return new PortalViewFrustum(camera, normals, signs);
-        }
-
-        private boolean contains(Vec3d point) {
-            Vec3d direction = point.subtract(camera);
-            for (int i = 0; i < sideNormals.length; i++) {
-                double sidedDistance = sideSigns[i] * sideNormals[i].dotProduct(direction);
-                if (sidedDistance < -FRUSTUM_CULL_EPSILON) {
-                    return false;
-                }
-            }
-            return true;
-        }
     }
 }
 
