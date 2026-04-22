@@ -152,12 +152,12 @@ public final class PortalSceneRenderer {
 
     private List<PortalInstance> sortedPortals(Vec3d camera) {
         List<PortalInstance> portals = new ArrayList<>(portalManager.activePortals());
-        portals.sort(Comparator.comparingDouble(p -> camera.squaredDistanceTo(p.center())));
+        portals.sort(Comparator.comparingDouble(p -> squaredHorizontalDistance(camera, p.center())));
         return portals;
     }
 
     private boolean isPortalValidForRendering(PortalInstance portal, Vec3d camera) {
-        return camera.squaredDistanceTo(portal.center()) <= MAX_PORTAL_RENDER_DISTANCE_SQ;
+        return squaredHorizontalDistance(camera, portal.center()) <= MAX_PORTAL_RENDER_DISTANCE_SQ;
     }
 
     private boolean renderPortalViewAreaToStencilAndDecideVisibility(PortalInstance portal, Matrix4f matrix) {
@@ -375,7 +375,7 @@ public final class PortalSceneRenderer {
             // Block center = corner + (0.5, 0.5, 0.5) in world axes (no portal-axis dependency).
             Vec3d worldCenter = worldMin.add(0.5D, 0.5D, 0.5D);
 
-            if (camera.squaredDistanceTo(worldCenter) > MAX_BLOCK_RENDER_DISTANCE_SQ) {
+            if (squaredHorizontalDistance(camera, worldCenter) > MAX_BLOCK_RENDER_DISTANCE_SQ) {
                 continue;
             }
 
@@ -586,6 +586,12 @@ public final class PortalSceneRenderer {
             return true;
         }
         return viewerSide * signedDistance <= PORTAL_FRONT_CLIP_EPSILON;
+    }
+
+    private static double squaredHorizontalDistance(Vec3d a, Vec3d b) {
+        double dx = a.x - b.x;
+        double dz = a.z - b.z;
+        return dx * dx + dz * dz;
     }
 }
 

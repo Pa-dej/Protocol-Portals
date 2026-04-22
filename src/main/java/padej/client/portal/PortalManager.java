@@ -32,10 +32,15 @@ public final class PortalManager {
         Vec3d up = basis.up();
 
         Vec3d center = player.getEyePos().add(normal.multiply(3.0D));
+        double eyeOffsetY = player.getEyeY() - player.getY();
         // Scene anchor = portal center. Blocks are placed at (center + relX, center + relY, center + relZ)
         // using world-space axes (east/up/south), so the scene is world-aligned regardless of portal facing.
-        // Tiny bias along portal normal so blocks don't z-fight with the portal plane itself.
-        Vec3d sceneAnchor = center.add(normal.multiply(0.01D));
+        // Snapshot relY is captured from block-position Y (feet-level), so we shift anchor down by eye offset
+        // to keep the viewed scene height aligned with what the player saw at capture time.
+        // Tiny bias along portal normal avoids z-fighting with the portal plane itself.
+        Vec3d sceneAnchor = center
+                .add(normal.multiply(0.01D))
+                .add(0.0D, -eyeOffsetY, 0.0D);
 
         List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
         PortalInstance portal = new PortalInstance(
@@ -92,7 +97,8 @@ public final class PortalManager {
     }
 
     private static int distanceSq(SceneSnapshot.SceneBlock block) {
-        return block.relX() * block.relX() + block.relY() * block.relY() + block.relZ() * block.relZ();
+        // Prioritize by horizontal distance only (XZ). Y should not affect portal block selection order.
+        return block.relX() * block.relX() + block.relZ() * block.relZ();
     }
 
     private static PlaneBasis buildVerticalPlaneBasis(float yawDegrees) {
