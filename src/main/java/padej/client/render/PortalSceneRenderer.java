@@ -7,10 +7,12 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.BlockEntityProvider;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gl.VertexBuffer;
 import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.client.gl.ShaderProgram;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.BuiltBuffer;
 import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
@@ -22,6 +24,7 @@ import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.BlockRenderManager;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
+import net.minecraft.client.util.BufferAllocator;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.util.math.BlockPos;
@@ -39,6 +42,7 @@ import padej.client.portal.PortalRenderBlock;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -112,7 +116,7 @@ public final class PortalSceneRenderer {
             }
 
             if (cachedScenes.size() > 128) {
-                cachedScenes.clear();
+                clearCachedScenes();
             }
 
             if (!stencilReadyThisFrame) {
@@ -390,125 +394,75 @@ public final class PortalSceneRenderer {
         }
 
         CachedScene cachedScene = getOrBuildCachedScene(client, portal);
-        if (cachedScene.sections().isEmpty()) {
+        if (cachedScene.meshes().isEmpty() && cachedScene.blockEntities().isEmpty()) {
             return;
         }
 
-        BlockRenderManager blockRenderManager = client.getBlockRenderManager();
-        var blockEntityRenderDispatcher = client.getBlockEntityRenderDispatcher();
-        VertexConsumerProvider.Immediate vertexConsumers = client.getBufferBuilders().getEntityVertexConsumers();
-        MatrixStack blockMatrices = new MatrixStack();
-        blockMatrices.translate(-camera.x, -camera.y, -camera.z);
-        Random random = Random.create();
-
-        List<CachedSection> visibleSections = new ArrayList<>(cachedScene.sections().size());
-        for (CachedSection section : cachedScene.sections()) {
-            Vec3d sectionCenter = portal.sceneAnchor().add(section.localCenter());
-            if (squaredHorizontalDistance(camera, sectionCenter) > maxBlockRenderDistanceSq) {
-                continue;
-            }
-            if (clipAgainstPortalPlane && !isInPortalContentHalfSpace(portal, sectionCenter, camera)) {
-                continue;
-            }
-            visibleSections.add(section);
+        if (squaredHorizontalDistance(camera, portal.sceneAnchor()) > maxBlockRenderDistanceSq) {
+            return;
+        }
+        if (clipAgainstPortalPlane && !isInPortalContentHalfSpace(portal, portal.sceneAnchor(), camera)) {
+            return;
         }
 
-        int rendered = 0;
-        int renderedFluids = 0;
-        for (CachedSection section : visibleSections) {
-            for (Map.Entry<RenderLayer, List<CachedPortalBlock>> layerEntry : section.blocksByLayer().entrySet()) {
-                VertexConsumer layerConsumer = vertexConsumers.getBuffer(layerEntry.getKey());
-                for (CachedPortalBlock cachedBlock : layerEntry.getValue()) {
-                    random.setSeed(cachedBlock.state().getRenderingSeed(cachedBlock.localPos()));
-                    Vec3d worldMin = sceneBlockMin(portal, cachedBlock.localMin());
-                    blockMatrices.push();
-                    blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
-                    blockRenderManager.renderBlock(
-                            cachedBlock.state(),
-                            cachedBlock.localPos(),
-                            cachedScene.sceneView(),
-                            blockMatrices,
-                            layerConsumer,
-                            true,
-                            random
-                    );
-                    blockMatrices.pop();
-                    rendered++;
-                }
-            }
-        }
+        Matrix4f modelMatrix = new Matrix4f().translation(
+                (float) (portal.sceneAnchor().x - camera.x),
+                (float) (portal.sceneAnchor().y - camera.y),
+                (float) (portal.sceneAnchor().z - camera.z)
+        );
+        Matrix4f projectionMatrix = new Matrix4f(RenderSystem.getProjectionMatrix());
 
-        for (CachedSection section : visibleSections) {
-            for (Map.Entry<RenderLayer, List<CachedPortalBlock>> layerEntry : section.blocksByLayer().entrySet()) {
-                for (CachedPortalBlock cachedBlock : layerEntry.getValue()) {
-                    FluidState fluidState = cachedBlock.state().getFluidState();
-                    if (fluidState.isEmpty()) {
-                        continue;
-                    }
-
-                    VertexConsumer fluidConsumer = vertexConsumers.getBuffer(RenderLayers.getFluidLayer(fluidState));
-                    int chunkBaseX = Math.floorDiv(cachedBlock.localPos().getX(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
-                    int chunkBaseY = Math.floorDiv(cachedBlock.localPos().getY(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
-                    int chunkBaseZ = Math.floorDiv(cachedBlock.localPos().getZ(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
-                    VertexConsumer shiftedFluidConsumer = new OffsetVertexConsumer(
-                            fluidConsumer,
-                            (float) (portal.sceneAnchor().x + chunkBaseX - camera.x),
-                            (float) (portal.sceneAnchor().y + chunkBaseY - camera.y),
-                            (float) (portal.sceneAnchor().z + chunkBaseZ - camera.z)
-                    );
-                    blockRenderManager.renderFluid(
-                            cachedBlock.localPos(),
-                            cachedScene.sceneView(),
-                            shiftedFluidConsumer,
-                            cachedBlock.state(),
-                            fluidState
-                    );
-                    renderedFluids++;
+        int renderedMeshes = 0;
+        for (CachedLayerMesh mesh : cachedScene.meshes()) {
+            mesh.layer().startDrawing();
+            mesh.vertexBuffer().bind();
+            try {
+                ShaderProgram shader = RenderSystem.getShader();
+                if (shader != null) {
+                    mesh.vertexBuffer().draw(modelMatrix, projectionMatrix, shader);
+                    renderedMeshes++;
                 }
+            } finally {
+                VertexBuffer.unbind();
+                mesh.layer().endDrawing();
             }
         }
 
         int renderedBlockEntities = 0;
-        for (CachedSection section : visibleSections) {
-            for (CachedPortalBlock cachedBlock : section.blockEntities()) {
-                BlockState state = cachedBlock.state();
-                BlockEntity blockEntity = null;
-                if (state.getBlock() instanceof BlockEntityProvider provider) {
-                    blockEntity = provider.createBlockEntity(cachedBlock.localPos(), state);
-                }
-                if (blockEntity == null) {
-                    continue;
-                }
+        if (!cachedScene.blockEntities().isEmpty()) {
+            VertexConsumerProvider.Immediate vertexConsumers = client.getBufferBuilders().getEntityVertexConsumers();
+            MatrixStack blockMatrices = new MatrixStack();
+            blockMatrices.translate(-camera.x, -camera.y, -camera.z);
 
-                blockEntity.setWorld(client.world);
-                if (cachedBlock.source().blockEntityNbt() != null) {
-                    blockEntity.read(cachedBlock.source().blockEntityNbt().copy(), client.world.getRegistryManager());
-                }
-
-                BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
-                if (renderer == null) {
+            for (CachedPortalBlockEntity cachedBlockEntity : cachedScene.blockEntities()) {
+                if (clipAgainstPortalPlane && !isInPortalContentHalfSpace(
+                        portal,
+                        portal.sceneAnchor().add(cachedBlockEntity.localMin()),
+                        camera
+                )) {
                     continue;
                 }
 
                 blockMatrices.push();
-                Vec3d worldMin = sceneBlockMin(portal, cachedBlock.localMin());
+                Vec3d worldMin = sceneBlockMin(portal, cachedBlockEntity.localMin());
                 blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
-                renderer.render(
-                        blockEntity,
+                cachedBlockEntity.renderer().render(
+                        cachedBlockEntity.blockEntity(),
                         tickDelta,
                         blockMatrices,
                         vertexConsumers,
-                        cachedBlock.light(),
+                        cachedBlockEntity.light(),
                         OverlayTexture.DEFAULT_UV
                 );
                 blockMatrices.pop();
                 renderedBlockEntities++;
             }
+
+            if (renderedBlockEntities > 0) {
+                vertexConsumers.draw();
+            }
         }
 
-        if (rendered > 0 || renderedFluids > 0 || renderedBlockEntities > 0) {
-            vertexConsumers.draw();
-        }
     }
 
     private static ShaderProgram getPortalAreaShader() {
@@ -552,6 +506,13 @@ public final class PortalSceneRenderer {
             stencilUnavailableLogged = true;
         }
         return false;
+    }
+
+    private void clearCachedScenes() {
+        for (CachedScene scene : cachedScenes.values()) {
+            scene.close();
+        }
+        cachedScenes.clear();
     }
 
     private static Vec3d sceneBlockMin(PortalInstance portal, Vec3d localBlockPosition) {
@@ -696,43 +657,141 @@ public final class PortalSceneRenderer {
     }
 
     private static CachedScene buildCachedScene(MinecraftClient client, PortalInstance portal) {
-        SceneBlockRenderView sceneView = SceneBlockRenderView.fromPortal(client, portal);
-        Map<Long, MutableSceneSection> sectionBuilders = new HashMap<>();
+        if (client.world == null) {
+            return new CachedScene(List.of(), List.of());
+        }
 
-        for (PortalRenderBlock block : portal.renderBlocks()) {
-            BlockState state = block.state();
-            if (state.isAir()) {
-                continue;
+        SceneBlockRenderView sceneView = SceneBlockRenderView.fromPortal(client, portal);
+        BlockRenderManager blockRenderManager = client.getBlockRenderManager();
+        var blockEntityRenderDispatcher = client.getBlockEntityRenderDispatcher();
+        Random random = Random.create();
+        MatrixStack buildMatrices = new MatrixStack();
+        Map<RenderLayer, MeshBuildContext> meshBuilders = new LinkedHashMap<>();
+        List<MeshBuildContext> meshContexts = new ArrayList<>();
+        List<CachedPortalBlockEntity> blockEntities = new ArrayList<>();
+
+        try {
+            for (PortalRenderBlock block : portal.renderBlocks()) {
+                BlockState state = block.state();
+                if (state.isAir()) {
+                    continue;
+                }
+
+                BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
+                Vec3d localMin = block.localBlockPosition();
+                RenderLayer layer = RenderLayers.getBlockLayer(state);
+                MeshBuildContext blockMeshContext = meshBuilders.computeIfAbsent(layer, key -> {
+                    MeshBuildContext created = createMeshBuildContext(key);
+                    meshContexts.add(created);
+                    return created;
+                });
+
+                random.setSeed(state.getRenderingSeed(localPos));
+                buildMatrices.push();
+                buildMatrices.translate(localMin.x, localMin.y, localMin.z);
+                blockRenderManager.renderBlock(
+                        state,
+                        localPos,
+                        sceneView,
+                        buildMatrices,
+                        blockMeshContext.bufferBuilder(),
+                        true,
+                        random
+                );
+                buildMatrices.pop();
+
+                FluidState fluidState = state.getFluidState();
+                if (!fluidState.isEmpty()) {
+                    RenderLayer fluidLayer = RenderLayers.getFluidLayer(fluidState);
+                    MeshBuildContext fluidMeshContext = meshBuilders.computeIfAbsent(fluidLayer, key -> {
+                        MeshBuildContext created = createMeshBuildContext(key);
+                        meshContexts.add(created);
+                        return created;
+                    });
+                    int chunkBaseX = Math.floorDiv(localPos.getX(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
+                    int chunkBaseY = Math.floorDiv(localPos.getY(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
+                    int chunkBaseZ = Math.floorDiv(localPos.getZ(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
+                    VertexConsumer shiftedFluidConsumer = new OffsetVertexConsumer(
+                            fluidMeshContext.bufferBuilder(),
+                            chunkBaseX,
+                            chunkBaseY,
+                            chunkBaseZ
+                    );
+                    blockRenderManager.renderFluid(
+                            localPos,
+                            sceneView,
+                            shiftedFluidConsumer,
+                            state,
+                            fluidState
+                    );
+                }
+
+                BlockEntity blockEntity = null;
+                if (state.getBlock() instanceof BlockEntityProvider provider) {
+                    blockEntity = provider.createBlockEntity(localPos, state);
+                }
+                if (blockEntity == null) {
+                    continue;
+                }
+
+                blockEntity.setWorld(client.world);
+                if (block.blockEntityNbt() != null) {
+                    blockEntity.read(block.blockEntityNbt().copy(), client.world.getRegistryManager());
+                }
+
+                BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
+                if (renderer != null) {
+                    blockEntities.add(new CachedPortalBlockEntity(
+                            blockEntity,
+                            renderer,
+                            localMin,
+                            block.packedLight()
+                    ));
+                }
             }
 
-            BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
-            int sectionX = Math.floorDiv(localPos.getX(), SCENE_SECTION_SIZE);
-            int sectionY = Math.floorDiv(localPos.getY(), SCENE_SECTION_SIZE);
-            int sectionZ = Math.floorDiv(localPos.getZ(), SCENE_SECTION_SIZE);
-            long sectionKey = BlockPos.asLong(sectionX, sectionY, sectionZ);
+            List<CachedLayerMesh> meshes = new ArrayList<>(meshBuilders.size());
+            for (RenderLayer orderedLayer : RenderLayer.getBlockLayers()) {
+                MeshBuildContext context = meshBuilders.remove(orderedLayer);
+                if (context != null) {
+                    addMeshIfPresent(meshes, orderedLayer, context);
+                }
+            }
+            for (Map.Entry<RenderLayer, MeshBuildContext> entry : meshBuilders.entrySet()) {
+                addMeshIfPresent(meshes, entry.getKey(), entry.getValue());
+            }
 
-            MutableSceneSection section = sectionBuilders.computeIfAbsent(
-                    sectionKey,
-                    unused -> new MutableSceneSection(sectionX, sectionY, sectionZ)
-            );
+            return new CachedScene(meshes, blockEntities);
+        } finally {
+            for (MeshBuildContext context : meshContexts) {
+                context.close();
+            }
+        }
+    }
 
-            RenderLayer layer = RenderLayers.getBlockLayer(state);
-            CachedPortalBlock cachedBlock = new CachedPortalBlock(
-                    block,
-                    state,
-                    localPos,
-                    block.localBlockPosition(),
-                    block.packedLight()
-            );
-            section.add(layer, cachedBlock);
+    private static MeshBuildContext createMeshBuildContext(RenderLayer layer) {
+        int allocatorSize = Math.max(layer.getExpectedBufferSize(), 1024);
+        BufferAllocator allocator = new BufferAllocator(allocatorSize);
+        BufferBuilder bufferBuilder = new BufferBuilder(allocator, layer.getDrawMode(), layer.getVertexFormat());
+        return new MeshBuildContext(allocator, bufferBuilder);
+    }
+
+    private static void addMeshIfPresent(List<CachedLayerMesh> meshes, RenderLayer layer, MeshBuildContext context) {
+        BuiltBuffer builtBuffer = context.bufferBuilder().endNullable();
+        if (builtBuffer == null) {
+            return;
         }
 
-        List<CachedSection> sections = new ArrayList<>(sectionBuilders.size());
-        for (MutableSceneSection section : sectionBuilders.values()) {
-            sections.add(section.build());
+        try (builtBuffer) {
+            VertexBuffer vertexBuffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+            try {
+                vertexBuffer.bind();
+                vertexBuffer.upload(builtBuffer);
+            } finally {
+                VertexBuffer.unbind();
+            }
+            meshes.add(new CachedLayerMesh(layer, vertexBuffer));
         }
-
-        return new CachedScene(sceneView, sections);
     }
 
     private static double computeDynamicPortalBlockDistanceSq(int portalCount, int currentFps) {
@@ -788,53 +847,58 @@ public final class PortalSceneRenderer {
     }
 
     private record CachedScene(
-            SceneBlockRenderView sceneView,
-            List<CachedSection> sections
-    ) {
+            List<CachedLayerMesh> meshes,
+            List<CachedPortalBlockEntity> blockEntities
+    ) implements AutoCloseable {
+        private CachedScene {
+            meshes = List.copyOf(meshes);
+            blockEntities = List.copyOf(blockEntities);
+        }
+
+        @Override
+        public void close() {
+            for (CachedLayerMesh mesh : meshes) {
+                mesh.close();
+            }
+        }
     }
 
-    private record CachedSection(
-            Vec3d localCenter,
-            Map<RenderLayer, List<CachedPortalBlock>> blocksByLayer,
-            List<CachedPortalBlock> blockEntities
-    ) {
+    private record CachedLayerMesh(
+            RenderLayer layer,
+            VertexBuffer vertexBuffer
+    ) implements AutoCloseable {
+        @Override
+        public void close() {
+            if (!vertexBuffer.isClosed()) {
+                vertexBuffer.close();
+            }
+        }
     }
 
-    private record CachedPortalBlock(
-            PortalRenderBlock source,
-            BlockState state,
-            BlockPos localPos,
+    private record CachedPortalBlockEntity(
+            BlockEntity blockEntity,
+            BlockEntityRenderer<BlockEntity> renderer,
             Vec3d localMin,
             int light
     ) {
     }
 
-    private static final class MutableSceneSection {
-        private final Vec3d localCenter;
-        private final Map<RenderLayer, List<CachedPortalBlock>> blocksByLayer = new HashMap<>();
-        private final List<CachedPortalBlock> blockEntities = new ArrayList<>();
+    private static final class MeshBuildContext implements AutoCloseable {
+        private final BufferAllocator allocator;
+        private final BufferBuilder bufferBuilder;
 
-        private MutableSceneSection(int sectionX, int sectionY, int sectionZ) {
-            this.localCenter = new Vec3d(
-                    sectionX * SCENE_SECTION_SIZE + SCENE_SECTION_SIZE * 0.5D,
-                    sectionY * SCENE_SECTION_SIZE + SCENE_SECTION_SIZE * 0.5D,
-                    sectionZ * SCENE_SECTION_SIZE + SCENE_SECTION_SIZE * 0.5D
-            );
+        private MeshBuildContext(BufferAllocator allocator, BufferBuilder bufferBuilder) {
+            this.allocator = allocator;
+            this.bufferBuilder = bufferBuilder;
         }
 
-        private void add(RenderLayer layer, CachedPortalBlock block) {
-            blocksByLayer.computeIfAbsent(layer, unused -> new ArrayList<>()).add(block);
-            if (block.state().hasBlockEntity()) {
-                blockEntities.add(block);
-            }
+        private BufferBuilder bufferBuilder() {
+            return bufferBuilder;
         }
 
-        private CachedSection build() {
-            Map<RenderLayer, List<CachedPortalBlock>> builtLayers = new HashMap<>(blocksByLayer.size());
-            for (Map.Entry<RenderLayer, List<CachedPortalBlock>> entry : blocksByLayer.entrySet()) {
-                builtLayers.put(entry.getKey(), List.copyOf(entry.getValue()));
-            }
-            return new CachedSection(localCenter, builtLayers, List.copyOf(blockEntities));
+        @Override
+        public void close() {
+            allocator.close();
         }
     }
 
