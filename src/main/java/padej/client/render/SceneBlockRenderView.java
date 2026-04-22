@@ -12,6 +12,7 @@ import net.minecraft.world.BlockRenderView;
 import net.minecraft.world.LightType;
 import net.minecraft.world.biome.ColorResolver;
 import net.minecraft.world.chunk.light.LightingProvider;
+import padej.client.portal.PortalLightSample;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalRenderBlock;
 
@@ -41,13 +42,20 @@ public final class SceneBlockRenderView implements BlockRenderView {
             throw new IllegalStateException("Client world is required for scene rendering");
         }
 
-        Map<Long, BlockState> states = new HashMap<>(Math.max(16, portal.renderBlocks().size() * 2));
-        Map<Long, Integer> lights = new HashMap<>(Math.max(16, portal.renderBlocks().size() * 2));
+        int stateCapacity = Math.max(16, portal.renderBlocks().size() * 2);
+        int lightCapacity = Math.max(16, (portal.renderBlocks().size() + portal.lightSamples().size()) * 2);
+        Map<Long, BlockState> states = new HashMap<>(stateCapacity);
+        Map<Long, Integer> lights = new HashMap<>(lightCapacity);
         for (PortalRenderBlock block : portal.renderBlocks()) {
             BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
             long key = BlockPos.asLong(localPos.getX(), localPos.getY(), localPos.getZ());
             states.put(key, block.state());
-            lights.put(key, block.packedLight());
+            lights.merge(key, block.packedLight(), SceneBlockRenderView::maxPackedLight);
+        }
+
+        for (PortalLightSample sample : portal.lightSamples()) {
+            long key = BlockPos.asLong(sample.relX(), sample.relY(), sample.relZ());
+            lights.merge(key, sample.packedLight(), SceneBlockRenderView::maxPackedLight);
         }
 
         return new SceneBlockRenderView(world, states, lights);
@@ -116,5 +124,13 @@ public final class SceneBlockRenderView implements BlockRenderView {
             return Math.max(blockLight, getBlockState(pos).getLuminance());
         }
         return skyLight;
+    }
+
+    private static int maxPackedLight(int a, int b) {
+        int blockA = (a >> 4) & 0xF;
+        int blockB = (b >> 4) & 0xF;
+        int skyA = (a >> 20) & 0xF;
+        int skyB = (b >> 20) & 0xF;
+        return ((Math.max(skyA, skyB) & 0xF) << 20) | ((Math.max(blockA, blockB) & 0xF) << 4);
     }
 }

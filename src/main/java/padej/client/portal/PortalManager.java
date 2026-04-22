@@ -43,6 +43,7 @@ public final class PortalManager {
                 .add(0.0D, -eyeOffsetY, 0.0D);
 
         List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
+        List<PortalLightSample> lightSamples = prepareLightSamples(snapshot);
         PortalInstance portal = new PortalInstance(
                 UUID.randomUUID(),
                 sceneName,
@@ -53,7 +54,8 @@ public final class PortalManager {
                 sceneAnchor,
                 PORTAL_WIDTH,
                 PORTAL_HEIGHT,
-                renderBlocks
+                renderBlocks,
+                lightSamples
         );
         activePortals.add(portal);
         return portal;
@@ -91,6 +93,19 @@ public final class PortalManager {
                     block.state(),
                     block.packedLight(),
                     block.blockEntityNbt()
+            ));
+        }
+        return out;
+    }
+
+    private List<PortalLightSample> prepareLightSamples(SceneSnapshot snapshot) {
+        List<PortalLightSample> out = new ArrayList<>(snapshot.lightSamples().size());
+        for (SceneSnapshot.LightSample sample : snapshot.lightSamples()) {
+            out.add(new PortalLightSample(
+                    sample.relX(),
+                    sample.relY(),
+                    sample.relZ(),
+                    sample.packedLight()
             ));
         }
         return out;

@@ -15,6 +15,11 @@ public record PortalInstance(
         Vec3d sceneAnchor,
         double width,
         double height,
-        List<PortalRenderBlock> renderBlocks
+        List<PortalRenderBlock> renderBlocks,
+        List<PortalLightSample> lightSamples
 ) {
+    public PortalInstance {
+        renderBlocks = List.copyOf(renderBlocks);
+        lightSamples = List.copyOf(lightSamples);
+    }
 }

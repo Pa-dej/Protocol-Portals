@@ -14,6 +14,7 @@ public final class SceneSnapshot {
     private final int centerBlockZ;
     private final float captureYaw;
     private final List<SceneBlock> blocks;
+    private final List<LightSample> lightSamples;
 
     public SceneSnapshot(
             String sceneName,
@@ -22,7 +23,8 @@ public final class SceneSnapshot {
             int centerBlockY,
             int centerBlockZ,
             float captureYaw,
-            List<SceneBlock> blocks
+            List<SceneBlock> blocks,
+            List<LightSample> lightSamples
     ) {
         this.sceneName = sceneName;
         this.dimensionId = dimensionId;
@@ -31,6 +33,7 @@ public final class SceneSnapshot {
         this.centerBlockZ = centerBlockZ;
         this.captureYaw = captureYaw;
         this.blocks = List.copyOf(blocks);
+        this.lightSamples = List.copyOf(lightSamples);
     }
 
     public String sceneName() {
@@ -61,6 +64,10 @@ public final class SceneSnapshot {
         return blocks;
     }
 
+    public List<LightSample> lightSamples() {
+        return lightSamples;
+    }
+
     public record SceneBlock(
             int relX,
             int relY,
@@ -72,5 +79,13 @@ public final class SceneSnapshot {
         public SceneBlock {
             blockEntityNbt = blockEntityNbt == null ? null : blockEntityNbt.copy();
         }
+    }
+
+    public record LightSample(
+            int relX,
+            int relY,
+            int relZ,
+            int packedLight
+    ) {
     }
 }

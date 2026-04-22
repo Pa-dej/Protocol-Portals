@@ -22,7 +22,7 @@ import java.util.Map;
 import java.util.Optional;
 
 public final class SceneSnapshotIO {
-    private static final int FORMAT_VERSION = 2;
+    private static final int FORMAT_VERSION = 3;
 
     private SceneSnapshotIO() {
     }
@@ -40,6 +40,7 @@ public final class SceneSnapshotIO {
         Map<BlockState, Integer> paletteIndex = new HashMap<>();
         NbtList palette = new NbtList();
         NbtList blocks = new NbtList();
+        NbtList lightSamples = new NbtList();
 
         for (SceneSnapshot.SceneBlock block : snapshot.blocks()) {
             Integer index = paletteIndex.get(block.state());
@@ -61,8 +62,18 @@ public final class SceneSnapshotIO {
             blocks.add(blockNbt);
         }
 
+        for (SceneSnapshot.LightSample sample : snapshot.lightSamples()) {
+            NbtCompound sampleNbt = new NbtCompound();
+            sampleNbt.putInt("x", sample.relX());
+            sampleNbt.putInt("y", sample.relY());
+            sampleNbt.putInt("z", sample.relZ());
+            sampleNbt.putInt("l", sample.packedLight());
+            lightSamples.add(sampleNbt);
+        }
+
         root.put("palette", palette);
         root.put("blocks", blocks);
+        root.put("light_samples", lightSamples);
         NbtIo.writeCompressed(root, path);
     }
 
@@ -73,7 +84,7 @@ public final class SceneSnapshotIO {
         }
 
         int version = root.getInt("format");
-        if (version != 1 && version != FORMAT_VERSION) {
+        if (version < 1 || version > FORMAT_VERSION) {
             throw new IOException("Unsupported scene format version: " + version);
         }
 
@@ -118,7 +129,25 @@ public final class SceneSnapshotIO {
             ));
         }
 
-        return new SceneSnapshot(sceneName, dimension, centerX, centerY, centerZ, captureYaw, blocks);
+        List<SceneSnapshot.LightSample> lightSamples = new ArrayList<>();
+        if (version >= 3 && root.contains("light_samples", NbtElement.LIST_TYPE)) {
+            NbtList lightSamplesNbt = root.getList("light_samples", NbtElement.COMPOUND_TYPE);
+            lightSamples = new ArrayList<>(lightSamplesNbt.size());
+            for (int i = 0; i < lightSamplesNbt.size(); i++) {
+                NbtCompound sampleNbt = lightSamplesNbt.getCompound(i);
+                if (!sampleNbt.contains("l", NbtElement.INT_TYPE)) {
+                    continue;
+                }
+                lightSamples.add(new SceneSnapshot.LightSample(
+                        sampleNbt.getInt("x"),
+                        sampleNbt.getInt("y"),
+                        sampleNbt.getInt("z"),
+                        sampleNbt.getInt("l")
+                ));
+            }
+        }
+
+        return new SceneSnapshot(sceneName, dimension, centerX, centerY, centerZ, captureYaw, blocks, lightSamples);
     }
 
     private static NbtCompound writeState(BlockState state) {

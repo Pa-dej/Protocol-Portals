@@ -30,6 +30,7 @@ public final class SceneRepository {
     private static final int SNAPSHOT_HORIZONTAL_RADIUS_BLOCKS = 48;
     private static final int SNAPSHOT_VERTICAL_RADIUS_BLOCKS = 48;
     private static final int MAX_CAPTURED_BLOCKS = 180_000;
+    private static final int MAX_CAPTURED_LIGHT_SAMPLES = 240_000;
 
     private final Path scenesDir;
     private final Map<String, SceneSnapshot> cache = new HashMap<>();
@@ -104,6 +105,7 @@ public final class SceneRepository {
         int maxChunkZ = Math.floorDiv(maxZ, 16);
 
         List<SceneSnapshot.SceneBlock> blocks = new ArrayList<>();
+        List<SceneSnapshot.LightSample> lightSamples = new ArrayList<>();
         BlockPos.Mutable mutableChunkPos = new BlockPos.Mutable();
         BlockPos.Mutable mutableWorldPos = new BlockPos.Mutable();
         boolean truncated = false;
@@ -135,22 +137,30 @@ public final class SceneRepository {
                             int localZ = worldZ - chunkStartZ;
                             mutableChunkPos.set(localX, y, localZ);
                             BlockState state = chunk.getBlockState(mutableChunkPos);
-                            if (state.isAir()) {
-                                continue;
-                            }
-
                             mutableWorldPos.set(worldX, y, worldZ);
                             int blockLight = world.getLightLevel(LightType.BLOCK, mutableWorldPos);
                             int skyLight = world.getLightLevel(LightType.SKY, mutableWorldPos);
                             int packedLight = LightmapTextureManager.pack(blockLight, skyLight);
+                            int relY = y - centerY;
+                            int relZ = worldZ - centerZ;
+
+                            if (state.isAir()) {
+                                // Preserve propagated block light around emitters (torches, lanterns, etc.).
+                                if (blockLight > 0) {
+                                    lightSamples.add(new SceneSnapshot.LightSample(relX, relY, relZ, packedLight));
+                                    if (lightSamples.size() >= MAX_CAPTURED_LIGHT_SAMPLES) {
+                                        truncated = true;
+                                        break captureLoop;
+                                    }
+                                }
+                                continue;
+                            }
 
                             BlockEntity blockEntity = world.getBlockEntity(mutableWorldPos);
                             NbtCompound blockEntityNbt = blockEntity != null
                                     ? blockEntity.createNbt(world.getRegistryManager())
                                     : null;
 
-                            int relY = y - centerY;
-                            int relZ = worldZ - centerZ;
                             blocks.add(new SceneSnapshot.SceneBlock(
                                     relX,
                                     relY,
@@ -176,7 +186,8 @@ public final class SceneRepository {
                 centerY,
                 centerZ,
                 player.getYaw(),
-                blocks
+                blocks,
+                lightSamples
         );
 
         SceneSnapshotIO.write(scenePath(normalized), snapshot);
