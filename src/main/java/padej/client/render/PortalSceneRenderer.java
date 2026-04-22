@@ -23,6 +23,7 @@ import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.BlockRenderManager;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.fluid.FluidState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
@@ -121,7 +122,7 @@ public final class PortalSceneRenderer {
 
             RenderSystem.enableDepthTest();
             RenderSystem.depthFunc(GL11.GL_LEQUAL);
-            RenderSystem.disableCull();
+            RenderSystem.enableCull();
 
             for (PortalInstance portal : portals) {
                 if (!isPortalValidForRendering(portal, camera)) {
@@ -208,7 +209,7 @@ public final class PortalSceneRenderer {
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
         RenderSystem.depthFunc(GL11.GL_ALWAYS);
         GL11.glDepthRange(1.0D, 1.0D);
-        drawPortalPlaneQuad(portal, matrix, 255, 255, 255, 0);
+        drawPortalPlaneQuadWithoutCull(portal, matrix, 255, 255, 255, 0);
         GL11.glDepthRange(0.0D, 1.0D);
     }
 
@@ -225,6 +226,7 @@ public final class PortalSceneRenderer {
         GL11.glStencilMask(0x00);
         GL11.glStencilFunc(GL11.GL_EQUAL, THIS_PORTAL_STENCIL_VALUE, 0xFF);
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
+        RenderSystem.enableCull();
 
         // World-aligned mode: blocks are placed along world axes, not along portal normal,
         // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
@@ -239,7 +241,7 @@ public final class PortalSceneRenderer {
         GL11.glStencilMask(0x00);
         GL11.glStencilFunc(GL11.GL_EQUAL, THIS_PORTAL_STENCIL_VALUE, 0xFF);
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
-        drawPortalPlaneQuad(portal, matrix, 255, 255, 255, 0);
+        drawPortalPlaneQuadWithoutCull(portal, matrix, 255, 255, 255, 0);
     }
 
     private void clampStencilValue(int maxStencilValue) {
@@ -355,7 +357,7 @@ public final class PortalSceneRenderer {
     ) {
         RenderSystem.enableDepthTest();
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
-        RenderSystem.disableCull();
+        RenderSystem.enableCull();
 
         if (!fallbackModeLogged) {
             System.err.println("[Protocol Portals] Rendering portal content in fallback mode without stencil clipping.");
@@ -412,13 +414,14 @@ public final class PortalSceneRenderer {
         }
 
         int rendered = 0;
+        int renderedFluids = 0;
         for (CachedSection section : visibleSections) {
             for (Map.Entry<RenderLayer, List<CachedPortalBlock>> layerEntry : section.blocksByLayer().entrySet()) {
                 VertexConsumer layerConsumer = vertexConsumers.getBuffer(layerEntry.getKey());
                 for (CachedPortalBlock cachedBlock : layerEntry.getValue()) {
                     random.setSeed(cachedBlock.state().getRenderingSeed(cachedBlock.localPos()));
-                    blockMatrices.push();
                     Vec3d worldMin = sceneBlockMin(portal, cachedBlock.localMin());
+                    blockMatrices.push();
                     blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
                     blockRenderManager.renderBlock(
                             cachedBlock.state(),
@@ -431,6 +434,36 @@ public final class PortalSceneRenderer {
                     );
                     blockMatrices.pop();
                     rendered++;
+                }
+            }
+        }
+
+        for (CachedSection section : visibleSections) {
+            for (Map.Entry<RenderLayer, List<CachedPortalBlock>> layerEntry : section.blocksByLayer().entrySet()) {
+                for (CachedPortalBlock cachedBlock : layerEntry.getValue()) {
+                    FluidState fluidState = cachedBlock.state().getFluidState();
+                    if (fluidState.isEmpty()) {
+                        continue;
+                    }
+
+                    VertexConsumer fluidConsumer = vertexConsumers.getBuffer(RenderLayers.getFluidLayer(fluidState));
+                    int chunkBaseX = Math.floorDiv(cachedBlock.localPos().getX(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
+                    int chunkBaseY = Math.floorDiv(cachedBlock.localPos().getY(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
+                    int chunkBaseZ = Math.floorDiv(cachedBlock.localPos().getZ(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
+                    VertexConsumer shiftedFluidConsumer = new OffsetVertexConsumer(
+                            fluidConsumer,
+                            (float) (portal.sceneAnchor().x + chunkBaseX - camera.x),
+                            (float) (portal.sceneAnchor().y + chunkBaseY - camera.y),
+                            (float) (portal.sceneAnchor().z + chunkBaseZ - camera.z)
+                    );
+                    blockRenderManager.renderFluid(
+                            cachedBlock.localPos(),
+                            cachedScene.sceneView(),
+                            shiftedFluidConsumer,
+                            cachedBlock.state(),
+                            fluidState
+                    );
+                    renderedFluids++;
                 }
             }
         }
@@ -473,7 +506,7 @@ public final class PortalSceneRenderer {
             }
         }
 
-        if (rendered > 0 || renderedBlockEntities > 0) {
+        if (rendered > 0 || renderedFluids > 0 || renderedBlockEntities > 0) {
             vertexConsumers.draw();
         }
     }
@@ -531,6 +564,20 @@ public final class PortalSceneRenderer {
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
         addPlaneQuad(buffer, matrix, portal.center(), portal.right(), portal.up(), portal.width(), portal.height(), red, green, blue, alpha);
         BufferRenderer.drawWithGlobalProgram(buffer.end());
+    }
+
+    private static void drawPortalPlaneQuadWithoutCull(PortalInstance portal, Matrix4f matrix, int red, int green, int blue, int alpha) {
+        boolean cullWasEnabled = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        if (cullWasEnabled) {
+            RenderSystem.disableCull();
+        }
+        try {
+            drawPortalPlaneQuad(portal, matrix, red, green, blue, alpha);
+        } finally {
+            if (cullWasEnabled) {
+                RenderSystem.enableCull();
+            }
+        }
     }
 
     private static void addPortalFrame(BufferBuilder lines, Matrix4f matrix, PortalInstance portal) {
@@ -788,6 +835,56 @@ public final class PortalSceneRenderer {
                 builtLayers.put(entry.getKey(), List.copyOf(entry.getValue()));
             }
             return new CachedSection(localCenter, builtLayers, List.copyOf(blockEntities));
+        }
+    }
+
+    private static final class OffsetVertexConsumer implements VertexConsumer {
+        private final VertexConsumer delegate;
+        private final float offsetX;
+        private final float offsetY;
+        private final float offsetZ;
+
+        private OffsetVertexConsumer(VertexConsumer delegate, float offsetX, float offsetY, float offsetZ) {
+            this.delegate = delegate;
+            this.offsetX = offsetX;
+            this.offsetY = offsetY;
+            this.offsetZ = offsetZ;
+        }
+
+        @Override
+        public VertexConsumer vertex(float x, float y, float z) {
+            delegate.vertex(x + offsetX, y + offsetY, z + offsetZ);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer color(int red, int green, int blue, int alpha) {
+            delegate.color(red, green, blue, alpha);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer texture(float u, float v) {
+            delegate.texture(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer overlay(int u, int v) {
+            delegate.overlay(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer light(int u, int v) {
+            delegate.light(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer normal(float x, float y, float z) {
+            delegate.normal(x, y, z);
+            return this;
         }
     }
 }
