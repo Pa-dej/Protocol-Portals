@@ -10,7 +10,6 @@ import java.io.IOException;
 
 public final class ProtocolPortalsShaders {
     private static ShaderProgram portalAreaProgram;
-    private static ShaderProgram portalSceneProgram;
 
     private ProtocolPortalsShaders() {
     }
@@ -25,18 +24,9 @@ public final class ProtocolPortalsShaders {
                 VertexFormats.POSITION_COLOR,
                 shaderProgram -> portalAreaProgram = shaderProgram
         );
-        context.register(
-                Identifier.of(Main.MOD_ID, "portal_scene"),
-                VertexFormats.POSITION_COLOR,
-                shaderProgram -> portalSceneProgram = shaderProgram
-        );
     }
 
     public static ShaderProgram portalAreaProgram() {
         return portalAreaProgram;
-    }
-
-    public static ShaderProgram portalSceneProgram() {
-        return portalSceneProgram;
     }
 }

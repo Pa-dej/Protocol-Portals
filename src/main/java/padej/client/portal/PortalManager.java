@@ -1,10 +1,6 @@
 package padej.client.portal;
 
-import net.minecraft.block.BlockState;
-import net.minecraft.block.MapColor;
 import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.registry.Registries;
-import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import padej.client.scene.SceneSnapshot;
 
@@ -84,10 +80,6 @@ public final class PortalManager {
         List<PortalRenderBlock> out = new ArrayList<>(Math.min(MAX_RENDER_BLOCKS_PER_PORTAL, sorted.size()));
         for (int i = 0; i < sorted.size() && i < MAX_RENDER_BLOCKS_PER_PORTAL; i++) {
             SceneSnapshot.SceneBlock block = sorted.get(i);
-            int rgb = colorFor(block.state());
-            int red = (rgb >> 16) & 0xFF;
-            int green = (rgb >> 8) & 0xFF;
-            int blue = rgb & 0xFF;
 
             int x = block.relX();
             int z = block.relZ();
@@ -112,27 +104,13 @@ public final class PortalManager {
                 }
             }
 
-            out.add(new PortalRenderBlock(new Vec3d(rotatedX, block.relY(), rotatedZ), red, green, blue));
+            out.add(new PortalRenderBlock(new Vec3d(rotatedX, block.relY(), rotatedZ), block.state()));
         }
         return out;
     }
 
     private static int distanceSq(SceneSnapshot.SceneBlock block) {
         return block.relX() * block.relX() + block.relY() * block.relY() + block.relZ() * block.relZ();
-    }
-
-    private static int colorFor(BlockState state) {
-        MapColor mapColor = state.getBlock().getDefaultMapColor();
-        if (mapColor != null && mapColor != MapColor.CLEAR) {
-            return mapColor.color;
-        }
-
-        Identifier blockId = Registries.BLOCK.getId(state.getBlock());
-        int hash = blockId.hashCode();
-        int red = 96 + Math.floorMod(hash, 96);
-        int green = 96 + Math.floorMod(hash / 17, 96);
-        int blue = 96 + Math.floorMod(hash / 31, 96);
-        return (red << 16) | (green << 8) | blue;
     }
 
     private static PlaneBasis buildVerticalPlaneBasis(float yawDegrees) {
