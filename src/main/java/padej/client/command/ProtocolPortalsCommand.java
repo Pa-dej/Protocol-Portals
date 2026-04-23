@@ -13,7 +13,6 @@ import padej.client.scene.SceneRepository;
 import padej.client.scene.SceneSnapshot;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -61,17 +60,22 @@ public final class ProtocolPortalsCommand {
             return 0;
         }
 
-        source.sendFeedback(Text.literal("Creating snapshot '" + fileName + "'..."));
+        source.sendFeedback(Text.literal("Starting snapshot capture '" + fileName + "'..."));
         try {
-            SceneRepository.CaptureResult result = sceneRepository.captureAndSave(client, fileName);
-            Path scenePath = sceneRepository.scenesDir().resolve(result.sceneName().toLowerCase(Locale.ROOT) + ".nbt");
-            source.sendFeedback(Text.literal("Snapshot '" + result.sceneName() + "' saved (" + result.blockCount()
-                    + " blocks, radius " + result.horizontalRadius() + "x" + result.verticalRadius() + "x"
-                    + result.horizontalRadius() + ") to " + scenePath));
-            if (result.truncated()) {
-                source.sendFeedback(Text.literal("Snapshot reached safety limit (" + result.blockCount()
-                        + " blocks). Capture was truncated to prevent OutOfMemory."));
-            }
+            SceneRepository.CaptureStartResult start = sceneRepository.startCapture(
+                    client,
+                    fileName,
+                    result -> source.sendFeedback(Text.literal("Snapshot '" + result.sceneName() + "' saved ("
+                            + result.blockCount() + " blocks, " + result.lightSampleCount()
+                            + " light samples, " + result.chunkCount() + "/" + result.requestedChunkCount()
+                            + " chunks, skipped unloaded " + result.skippedUnloadedChunks() + ", radius "
+                            + result.horizontalRadius() + "x" + result.verticalRadius() + "x"
+                            + result.horizontalRadius() + ") to " + result.scenePath())),
+                    error -> source.sendError(Text.literal(error))
+            );
+            source.sendFeedback(Text.literal("Capture scheduled for " + start.totalChunks()
+                    + " chunks. Processing loaded chunks per tick: " + 2
+                    + ", unloaded probes per tick: " + 24 + "."));
             return 1;
         } catch (IOException exception) {
             source.sendError(Text.literal("Snapshot creation failed: " + exception.getMessage()));

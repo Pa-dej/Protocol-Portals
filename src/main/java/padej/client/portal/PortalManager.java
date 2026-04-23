@@ -5,13 +5,11 @@ import net.minecraft.util.math.Vec3d;
 import padej.client.scene.SceneSnapshot;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 public final class PortalManager {
-    private static final int MAX_RENDER_BLOCKS_PER_PORTAL = 12000;
     private static final double PORTAL_WIDTH = 3.0D;
     private static final double PORTAL_HEIGHT = 3.0D;
     private static final double PORTAL_FORWARD_DISTANCE = 3.0D;
@@ -100,15 +98,11 @@ public final class PortalManager {
     }
 
     private List<PortalRenderBlock> prepareRenderBlocks(SceneSnapshot snapshot) {
-        List<SceneSnapshot.SceneBlock> sorted = new ArrayList<>(snapshot.blocks());
-        sorted.sort(Comparator.comparingInt(PortalManager::distanceSq));
-
         // World-aligned mode: no rotation applied - blocks keep their original world-relative
         // positions (relX = east offset, relY = up offset, relZ = south offset).
         // BlockState is also not rotated since the scene is shown in its original orientation.
-        List<PortalRenderBlock> out = new ArrayList<>(Math.min(MAX_RENDER_BLOCKS_PER_PORTAL, sorted.size()));
-        for (int i = 0; i < sorted.size() && i < MAX_RENDER_BLOCKS_PER_PORTAL; i++) {
-            SceneSnapshot.SceneBlock block = sorted.get(i);
+        List<PortalRenderBlock> out = new ArrayList<>(snapshot.blocks().size());
+        for (SceneSnapshot.SceneBlock block : snapshot.blocks()) {
             out.add(new PortalRenderBlock(
                     new Vec3d(block.relX(), block.relY(), block.relZ()),
                     block.state(),
@@ -130,11 +124,6 @@ public final class PortalManager {
             ));
         }
         return out;
-    }
-
-    private static int distanceSq(SceneSnapshot.SceneBlock block) {
-        // Prioritize by horizontal distance only (XZ). Y should not affect portal block selection order.
-        return block.relX() * block.relX() + block.relZ() * block.relZ();
     }
 
     private static Vec3d alignPortalCenterToBlockGrid(Vec3d desiredCenter, Vec3d normal) {

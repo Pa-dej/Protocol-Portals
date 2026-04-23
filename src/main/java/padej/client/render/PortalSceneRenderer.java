@@ -52,8 +52,7 @@ public final class PortalSceneRenderer {
     private static final int SCENE_SECTION_SIZE = 16;
     private static final int OUTER_STENCIL_VALUE = 0;
     private static final int THIS_PORTAL_STENCIL_VALUE = 1;
-    private static final double MAX_PORTAL_RENDER_DISTANCE_SQ = 96.0D * 96.0D;
-    private static final double BASE_MAX_BLOCK_RENDER_DISTANCE = 256.0D;
+    private static final double UNLIMITED_BLOCK_RENDER_DISTANCE_SQ = Double.POSITIVE_INFINITY;
     private static final double PORTAL_FRONT_CLIP_EPSILON = 1.0E-3D;
     private static final double PORTAL_VIEW_MARGIN = 0.5D;
     private static final double INNER_FRUSTUM_CULL_EPSILON = 1.0E-4D;
@@ -127,8 +126,6 @@ public final class PortalSceneRenderer {
         }
 
         float tickDelta = context.tickCounter().getTickDelta(false);
-        int currentFps = MinecraftClient.getInstance().getCurrentFps();
-        double dynamicBlockRenderDistanceSq = computeDynamicPortalBlockDistanceSq(portals.size(), currentFps);
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -145,7 +142,7 @@ public final class PortalSceneRenderer {
             }
 
             if (!stencilReadyThisFrame) {
-                renderFallbackWithoutStencil(portals, camera, cameraForward, frustum, tickDelta, dynamicBlockRenderDistanceSq, matrix);
+                renderFallbackWithoutStencil(portals, camera, cameraForward, frustum, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ, matrix);
                 return;
             }
 
@@ -164,7 +161,7 @@ public final class PortalSceneRenderer {
 
                 clearDepthOfPortalViewArea(portal, matrix);
                 renderPortalSkyBackground(portal, matrix, portal.skyColor());
-                renderPortalContentInStencil(portal, camera, tickDelta, dynamicBlockRenderDistanceSq);
+                renderPortalContentInStencil(portal, camera, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ);
                 restoreDepthOfPortalViewArea(portal, matrix);
                 clampStencilValue(OUTER_STENCIL_VALUE);
             }
@@ -201,7 +198,7 @@ public final class PortalSceneRenderer {
     }
 
     private boolean isPortalValidForRendering(PortalInstance portal, Vec3d camera) {
-        return squaredHorizontalDistance(camera, portal.center()) <= MAX_PORTAL_RENDER_DISTANCE_SQ;
+        return true;
     }
 
     private boolean isPortalValidForRendering(PortalInstance portal, Vec3d camera, Vec3d cameraForward, Frustum frustum) {
@@ -966,31 +963,6 @@ public final class PortalSceneRenderer {
             }
             meshes.add(new CachedLayerMesh(layer, vertexBuffer));
         }
-    }
-
-    private static double computeDynamicPortalBlockDistanceSq(int portalCount, int currentFps) {
-        double maxDistance = BASE_MAX_BLOCK_RENDER_DISTANCE;
-
-        if (portalCount >= 4) {
-            maxDistance = Math.min(maxDistance, 192.0D);
-        }
-        if (portalCount >= 8) {
-            maxDistance = Math.min(maxDistance, 128.0D);
-        }
-
-        if (currentFps > 0) {
-            if (currentFps < 45) {
-                maxDistance = Math.min(maxDistance, 160.0D);
-            }
-            if (currentFps < 30) {
-                maxDistance = Math.min(maxDistance, 112.0D);
-            }
-            if (currentFps < 20) {
-                maxDistance = Math.min(maxDistance, 72.0D);
-            }
-        }
-
-        return maxDistance * maxDistance;
     }
 
     private static double squaredHorizontalDistance(Vec3d a, Vec3d b) {
