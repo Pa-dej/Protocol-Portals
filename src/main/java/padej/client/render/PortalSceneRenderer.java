@@ -10,6 +10,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.VertexBuffer;
 import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.client.gl.ShaderProgram;
+import net.minecraft.client.render.Frustum;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.BuiltBuffer;
@@ -26,8 +27,10 @@ import net.minecraft.client.render.block.BlockRenderManager;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.util.BufferAllocator;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
 import org.joml.Matrix4f;
@@ -53,6 +56,8 @@ public final class PortalSceneRenderer {
     private static final double MAX_PORTAL_RENDER_DISTANCE_SQ = 96.0D * 96.0D;
     private static final double BASE_MAX_BLOCK_RENDER_DISTANCE = 256.0D;
     private static final double PORTAL_FRONT_CLIP_EPSILON = 1.0E-3D;
+    private static final double PORTAL_VIEW_MARGIN = 0.5D;
+    private static final double INNER_FRUSTUM_CULL_EPSILON = 1.0E-4D;
 
     private final PortalManager portalManager;
     private final Map<SceneCacheKey, CachedScene> cachedScenes = new HashMap<>();
@@ -74,6 +79,7 @@ public final class PortalSceneRenderer {
         MinecraftClient client = MinecraftClient.getInstance();
         Framebuffer framebuffer = client.getFramebuffer();
         Vec3d camera = context.camera() != null ? context.camera().getPos() : null;
+        Vec3d cameraForward = context.camera() != null ? cameraForwardVector(context.camera().getYaw(), context.camera().getPitch()) : null;
 
         if (camera == null) {
             PortalOuterFrustumCulling.clear();
@@ -90,6 +96,7 @@ public final class PortalSceneRenderer {
         List<PortalInstance> cullingPortals = sortedPortals(camera)
                 .stream()
                 .filter(portal -> isPortalValidForRendering(portal, camera))
+                .filter(portal -> cameraForward == null || isPortalInViewHemisphere(portal, camera, cameraForward))
                 .toList();
         PortalOuterFrustumCulling.update(cullingPortals, camera);
 
@@ -103,8 +110,14 @@ public final class PortalSceneRenderer {
     }
 
     private void renderPortals(WorldRenderContext context) {
+        if (context.camera() == null) {
+            return;
+        }
         List<DebugPlaneInstance> debugPlanes = portalManager.debugPlanes();
-        List<PortalInstance> portals = sortedPortals(context.camera().getPos());
+        Vec3d camera = context.camera().getPos();
+        Vec3d cameraForward = cameraForwardVector(context.camera().getYaw(), context.camera().getPitch());
+        Frustum frustum = context.frustum();
+        List<PortalInstance> portals = sortedPortals(camera);
         if (portals.isEmpty() && debugPlanes.isEmpty()) {
             return;
         }
@@ -114,10 +127,10 @@ public final class PortalSceneRenderer {
             return;
         }
 
-        Vec3d camera = context.camera().getPos();
         float tickDelta = context.tickCounter().getTickDelta(false);
         int currentFps = MinecraftClient.getInstance().getCurrentFps();
         double dynamicBlockRenderDistanceSq = computeDynamicPortalBlockDistanceSq(portals.size(), currentFps);
+        Vec3d portalSkyColor = resolvePortalSkyColor(context.world(), camera, tickDelta);
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -134,7 +147,7 @@ public final class PortalSceneRenderer {
             }
 
             if (!stencilReadyThisFrame) {
-                renderFallbackWithoutStencil(portals, camera, tickDelta, dynamicBlockRenderDistanceSq, matrix);
+                renderFallbackWithoutStencil(portals, camera, cameraForward, frustum, tickDelta, dynamicBlockRenderDistanceSq, matrix);
                 return;
             }
 
@@ -143,7 +156,7 @@ public final class PortalSceneRenderer {
             RenderSystem.enableCull();
 
             for (PortalInstance portal : portals) {
-                if (!isPortalValidForRendering(portal, camera)) {
+                if (!isPortalValidForRendering(portal, camera, cameraForward, frustum)) {
                     continue;
                 }
 
@@ -152,6 +165,7 @@ public final class PortalSceneRenderer {
                 }
 
                 clearDepthOfPortalViewArea(portal, matrix);
+                renderPortalSkyBackground(portalSkyColor);
                 renderPortalContentInStencil(portal, camera, tickDelta, dynamicBlockRenderDistanceSq);
                 restoreDepthOfPortalViewArea(portal, matrix);
                 clampStencilValue(OUTER_STENCIL_VALUE);
@@ -190,6 +204,52 @@ public final class PortalSceneRenderer {
 
     private boolean isPortalValidForRendering(PortalInstance portal, Vec3d camera) {
         return squaredHorizontalDistance(camera, portal.center()) <= MAX_PORTAL_RENDER_DISTANCE_SQ;
+    }
+
+    private boolean isPortalValidForRendering(PortalInstance portal, Vec3d camera, Vec3d cameraForward, Frustum frustum) {
+        if (!isPortalValidForRendering(portal, camera)) {
+            return false;
+        }
+        if (!isPortalInViewHemisphere(portal, camera, cameraForward)) {
+            return false;
+        }
+        return frustum == null || isPortalVisibleInFrustum(portal, frustum);
+    }
+
+    private static boolean isPortalInViewHemisphere(PortalInstance portal, Vec3d camera, Vec3d cameraForward) {
+        Vec3d toPortal = portal.center().subtract(camera);
+        double toPortalLengthSq = toPortal.lengthSquared();
+        if (toPortalLengthSq <= 1.0E-8D) {
+            return true;
+        }
+        double invLength = 1.0D / Math.sqrt(toPortalLengthSq);
+        Vec3d toPortalDirection = toPortal.multiply(invLength);
+        return toPortalDirection.dotProduct(cameraForward) > 0.0D;
+    }
+
+    private static boolean isPortalVisibleInFrustum(PortalInstance portal, Frustum frustum) {
+        return frustum.isVisible(computePortalVisibilityBox(portal));
+    }
+
+    private static Box computePortalVisibilityBox(PortalInstance portal) {
+        Vec3d center = portal.center();
+        Vec3d right = portal.right();
+        Vec3d up = portal.up();
+        double halfWidth = portal.width() * 0.5D + PORTAL_VIEW_MARGIN;
+        double halfHeight = portal.height() * 0.5D + PORTAL_VIEW_MARGIN;
+
+        double extentX = halfWidth * Math.abs(right.x) + halfHeight * Math.abs(up.x);
+        double extentY = halfWidth * Math.abs(right.y) + halfHeight * Math.abs(up.y);
+        double extentZ = halfWidth * Math.abs(right.z) + halfHeight * Math.abs(up.z);
+
+        return new Box(
+                center.x - extentX,
+                center.y - extentY,
+                center.z - extentZ,
+                center.x + extentX,
+                center.y + extentY,
+                center.z + extentZ
+        );
     }
 
     private boolean renderPortalViewAreaToStencilAndDecideVisibility(PortalInstance portal, Matrix4f matrix) {
@@ -251,6 +311,25 @@ public final class PortalSceneRenderer {
         // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
         // The stencil + depth buffer together handle correct visibility - no plane clip needed.
         renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
+    }
+
+    private void renderPortalSkyBackground(Vec3d skyColor) {
+        RenderSystem.disableBlend();
+        RenderSystem.colorMask(true, true, true, true);
+        RenderSystem.depthMask(true);
+        RenderSystem.depthFunc(GL11.GL_ALWAYS);
+        GL11.glStencilMask(0x00);
+        GL11.glStencilFunc(GL11.GL_EQUAL, THIS_PORTAL_STENCIL_VALUE, 0xFF);
+        GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
+        GL11.glDepthRange(1.0D, 1.0D);
+        drawScreenTriangle(
+                colorToByte(skyColor.x),
+                colorToByte(skyColor.y),
+                colorToByte(skyColor.z),
+                255
+        );
+        GL11.glDepthRange(0.0D, 1.0D);
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
     }
 
     private void restoreDepthOfPortalViewArea(PortalInstance portal, Matrix4f matrix) {
@@ -372,6 +451,8 @@ public final class PortalSceneRenderer {
     private void renderFallbackWithoutStencil(
             List<PortalInstance> portals,
             Vec3d camera,
+            Vec3d cameraForward,
+            Frustum frustum,
             float tickDelta,
             double maxBlockRenderDistanceSq,
             Matrix4f viewMatrix
@@ -386,7 +467,7 @@ public final class PortalSceneRenderer {
         }
 
         for (PortalInstance portal : portals) {
-            if (!isPortalValidForRendering(portal, camera)) {
+            if (!isPortalValidForRendering(portal, camera, cameraForward, frustum)) {
                 continue;
             }
             renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
@@ -409,7 +490,7 @@ public final class PortalSceneRenderer {
         }
 
         CachedScene cachedScene = getOrBuildCachedScene(client, portal);
-        if (cachedScene.meshes().isEmpty() && cachedScene.blockEntities().isEmpty()) {
+        if (cachedScene.sections().isEmpty() && cachedScene.blockEntities().isEmpty()) {
             return;
         }
 
@@ -420,43 +501,58 @@ public final class PortalSceneRenderer {
             return;
         }
 
+        InnerPortalFrustum innerFrustum = InnerPortalFrustum.fromPortal(portal, camera);
         float chunkOffsetX = (float) (portal.sceneAnchor().x - camera.x);
         float chunkOffsetY = (float) (portal.sceneAnchor().y - camera.y);
         float chunkOffsetZ = (float) (portal.sceneAnchor().z - camera.z);
 
         int renderedMeshes = 0;
-        for (CachedLayerMesh mesh : cachedScene.meshes()) {
-            mesh.layer().startDrawing();
-            try {
-                ShaderProgram shader = RenderSystem.getShader();
-                if (shader == null) {
+        for (CachedSection section : cachedScene.sections()) {
+            if (innerFrustum != null) {
+                double sectionMinX = portal.sceneAnchor().x + section.sectionKey().minBlockX();
+                double sectionMinY = portal.sceneAnchor().y + section.sectionKey().minBlockY();
+                double sectionMinZ = portal.sceneAnchor().z + section.sectionKey().minBlockZ();
+                double sectionMaxX = sectionMinX + SCENE_SECTION_SIZE;
+                double sectionMaxY = sectionMinY + SCENE_SECTION_SIZE;
+                double sectionMaxZ = sectionMinZ + SCENE_SECTION_SIZE;
+                if (innerFrustum.isFullyOutside(sectionMinX, sectionMinY, sectionMinZ, sectionMaxX, sectionMaxY, sectionMaxZ)) {
                     continue;
                 }
+            }
 
-                shader.initializeUniforms(
-                        mesh.layer().getDrawMode(),
-                        RenderSystem.getModelViewMatrix(),
-                        RenderSystem.getProjectionMatrix(),
-                        client.getWindow()
-                );
-                shader.bind();
+            for (CachedLayerMesh mesh : section.meshes()) {
+                mesh.layer().startDrawing();
                 try {
-                    if (shader.chunkOffset != null) {
-                        shader.chunkOffset.set(chunkOffsetX, chunkOffsetY, chunkOffsetZ);
-                        shader.chunkOffset.upload();
+                    ShaderProgram shader = RenderSystem.getShader();
+                    if (shader == null) {
+                        continue;
                     }
-                    mesh.vertexBuffer().bind();
-                    mesh.vertexBuffer().draw();
-                    renderedMeshes++;
+
+                    shader.initializeUniforms(
+                            mesh.layer().getDrawMode(),
+                            RenderSystem.getModelViewMatrix(),
+                            RenderSystem.getProjectionMatrix(),
+                            client.getWindow()
+                    );
+                    shader.bind();
+                    try {
+                        if (shader.chunkOffset != null) {
+                            shader.chunkOffset.set(chunkOffsetX, chunkOffsetY, chunkOffsetZ);
+                            shader.chunkOffset.upload();
+                        }
+                        mesh.vertexBuffer().bind();
+                        mesh.vertexBuffer().draw();
+                        renderedMeshes++;
+                    } finally {
+                        if (shader.chunkOffset != null) {
+                            shader.chunkOffset.set(0.0F, 0.0F, 0.0F);
+                        }
+                        shader.unbind();
+                        VertexBuffer.unbind();
+                    }
                 } finally {
-                    if (shader.chunkOffset != null) {
-                        shader.chunkOffset.set(0.0F, 0.0F, 0.0F);
-                    }
-                    shader.unbind();
-                    VertexBuffer.unbind();
+                    mesh.layer().endDrawing();
                 }
-            } finally {
-                mesh.layer().endDrawing();
             }
         }
 
@@ -475,8 +571,19 @@ public final class PortalSceneRenderer {
                     continue;
                 }
 
-                blockMatrices.push();
                 Vec3d worldMin = sceneBlockMin(portal, cachedBlockEntity.localMin());
+                if (innerFrustum != null && innerFrustum.isFullyOutside(
+                        worldMin.x,
+                        worldMin.y,
+                        worldMin.z,
+                        worldMin.x + 1.0D,
+                        worldMin.y + 1.0D,
+                        worldMin.z + 1.0D
+                )) {
+                    continue;
+                }
+
+                blockMatrices.push();
                 blockMatrices.translate(worldMin.x, worldMin.y, worldMin.z);
                 cachedBlockEntity.renderer().render(
                         cachedBlockEntity.blockEntity(),
@@ -551,6 +658,29 @@ public final class PortalSceneRenderer {
         // World-aligned: relX = east (+X), relY = up (+Y), relZ = south (+Z).
         // sceneAnchor is the portal center, so blocks appear at their true world-relative offsets.
         return portal.sceneAnchor().add(localBlockPosition);
+    }
+
+    private static Vec3d cameraForwardVector(float yawDegrees, float pitchDegrees) {
+        double yaw = Math.toRadians(yawDegrees);
+        double pitch = Math.toRadians(pitchDegrees);
+        double horizontal = Math.cos(pitch);
+        return new Vec3d(
+                -Math.sin(yaw) * horizontal,
+                -Math.sin(pitch),
+                Math.cos(yaw) * horizontal
+        );
+    }
+
+    private static Vec3d[] portalCorners(PortalInstance portal) {
+        Vec3d halfRight = portal.right().multiply(portal.width() * 0.5D);
+        Vec3d halfUp = portal.up().multiply(portal.height() * 0.5D);
+        Vec3d center = portal.center();
+        return new Vec3d[]{
+                center.subtract(halfRight).subtract(halfUp),
+                center.add(halfRight).subtract(halfUp),
+                center.add(halfRight).add(halfUp),
+                center.subtract(halfRight).add(halfUp)
+        };
     }
 
     private static void drawPortalPlaneQuad(PortalInstance portal, Matrix4f matrix, int red, int green, int blue, int alpha) {
@@ -657,13 +787,29 @@ public final class PortalSceneRenderer {
     }
 
     private static void drawScreenTriangle() {
+        drawScreenTriangle(255, 255, 255, 255);
+    }
+
+    private static void drawScreenTriangle(int red, int green, int blue, int alpha) {
         RenderSystem.setShader(GameRenderer::getPositionColorProgram);
         Matrix4f identity = new Matrix4f().identity();
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.TRIANGLES, VertexFormats.POSITION_COLOR);
-        buffer.vertex(identity, -1.0F, -1.0F, 0.0F).color(255, 255, 255, 255);
-        buffer.vertex(identity, 3.0F, -1.0F, 0.0F).color(255, 255, 255, 255);
-        buffer.vertex(identity, -1.0F, 3.0F, 0.0F).color(255, 255, 255, 255);
+        buffer.vertex(identity, -1.0F, -1.0F, 0.0F).color(red, green, blue, alpha);
+        buffer.vertex(identity, 3.0F, -1.0F, 0.0F).color(red, green, blue, alpha);
+        buffer.vertex(identity, -1.0F, 3.0F, 0.0F).color(red, green, blue, alpha);
         BufferRenderer.drawWithGlobalProgram(buffer.end());
+    }
+
+    private static Vec3d resolvePortalSkyColor(ClientWorld world, Vec3d camera, float tickDelta) {
+        if (world == null) {
+            return new Vec3d(0.0D, 0.0D, 0.0D);
+        }
+        return world.getSkyColor(camera, tickDelta);
+    }
+
+    private static int colorToByte(double color) {
+        double clamped = Math.max(0.0D, Math.min(1.0D, color));
+        return (int) Math.round(clamped * 255.0D);
     }
 
     private static boolean isInPortalContentHalfSpace(PortalInstance portal, Vec3d point, Vec3d camera) {
@@ -698,7 +844,7 @@ public final class PortalSceneRenderer {
         var blockEntityRenderDispatcher = client.getBlockEntityRenderDispatcher();
         Random random = Random.create();
         MatrixStack buildMatrices = new MatrixStack();
-        Map<RenderLayer, MeshBuildContext> meshBuilders = new LinkedHashMap<>();
+        Map<SectionKey, SectionBuildContext> sectionBuilders = new LinkedHashMap<>();
         List<MeshBuildContext> meshContexts = new ArrayList<>();
         List<CachedPortalBlockEntity> blockEntities = new ArrayList<>();
 
@@ -711,8 +857,10 @@ public final class PortalSceneRenderer {
 
                 BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
                 Vec3d localMin = block.localBlockPosition();
+                SectionKey sectionKey = SectionKey.fromLocalPos(localPos);
+                SectionBuildContext sectionContext = sectionBuilders.computeIfAbsent(sectionKey, SectionBuildContext::new);
                 RenderLayer layer = RenderLayers.getBlockLayer(state);
-                MeshBuildContext blockMeshContext = meshBuilders.computeIfAbsent(layer, key -> {
+                MeshBuildContext blockMeshContext = sectionContext.meshBuilders().computeIfAbsent(layer, key -> {
                     MeshBuildContext created = createMeshBuildContext(key);
                     meshContexts.add(created);
                     return created;
@@ -735,19 +883,16 @@ public final class PortalSceneRenderer {
                 FluidState fluidState = state.getFluidState();
                 if (!fluidState.isEmpty()) {
                     RenderLayer fluidLayer = RenderLayers.getFluidLayer(fluidState);
-                    MeshBuildContext fluidMeshContext = meshBuilders.computeIfAbsent(fluidLayer, key -> {
+                    MeshBuildContext fluidMeshContext = sectionContext.meshBuilders().computeIfAbsent(fluidLayer, key -> {
                         MeshBuildContext created = createMeshBuildContext(key);
                         meshContexts.add(created);
                         return created;
                     });
-                    int chunkBaseX = Math.floorDiv(localPos.getX(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
-                    int chunkBaseY = Math.floorDiv(localPos.getY(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
-                    int chunkBaseZ = Math.floorDiv(localPos.getZ(), SCENE_SECTION_SIZE) * SCENE_SECTION_SIZE;
                     VertexConsumer shiftedFluidConsumer = new OffsetVertexConsumer(
                             fluidMeshContext.bufferBuilder(),
-                            chunkBaseX,
-                            chunkBaseY,
-                            chunkBaseZ
+                            sectionKey.minBlockX(),
+                            sectionKey.minBlockY(),
+                            sectionKey.minBlockZ()
                     );
                     blockRenderManager.renderFluid(
                             localPos,
@@ -782,18 +927,26 @@ public final class PortalSceneRenderer {
                 }
             }
 
-            List<CachedLayerMesh> meshes = new ArrayList<>(meshBuilders.size());
-            for (RenderLayer orderedLayer : RenderLayer.getBlockLayers()) {
-                MeshBuildContext context = meshBuilders.remove(orderedLayer);
-                if (context != null) {
-                    addMeshIfPresent(meshes, orderedLayer, context);
+            List<CachedSection> sections = new ArrayList<>(sectionBuilders.size());
+            for (SectionBuildContext sectionContext : sectionBuilders.values()) {
+                Map<RenderLayer, MeshBuildContext> orderedBuilders = new LinkedHashMap<>(sectionContext.meshBuilders());
+                List<CachedLayerMesh> sectionMeshes = new ArrayList<>(orderedBuilders.size());
+
+                for (RenderLayer orderedLayer : RenderLayer.getBlockLayers()) {
+                    MeshBuildContext context = orderedBuilders.remove(orderedLayer);
+                    if (context != null) {
+                        addMeshIfPresent(sectionMeshes, orderedLayer, context);
+                    }
+                }
+                for (Map.Entry<RenderLayer, MeshBuildContext> entry : orderedBuilders.entrySet()) {
+                    addMeshIfPresent(sectionMeshes, entry.getKey(), entry.getValue());
+                }
+                if (!sectionMeshes.isEmpty()) {
+                    sections.add(new CachedSection(sectionContext.sectionKey(), sectionMeshes));
                 }
             }
-            for (Map.Entry<RenderLayer, MeshBuildContext> entry : meshBuilders.entrySet()) {
-                addMeshIfPresent(meshes, entry.getKey(), entry.getValue());
-            }
 
-            return new CachedScene(meshes, blockEntities);
+            return new CachedScene(sections, blockEntities);
         } finally {
             for (MeshBuildContext context : meshContexts) {
                 context.close();
@@ -857,6 +1010,103 @@ public final class PortalSceneRenderer {
         return dx * dx + dz * dz;
     }
 
+    private static final class InnerPortalFrustum {
+        private final CullingPlane[] planes;
+
+        private InnerPortalFrustum(CullingPlane[] planes) {
+            this.planes = planes;
+        }
+
+        private static InnerPortalFrustum fromPortal(PortalInstance portal, Vec3d camera) {
+            Vec3d insideDirection = portal.center().subtract(camera);
+            if (insideDirection.lengthSquared() <= 1.0E-8D) {
+                return null;
+            }
+
+            Vec3d[] corners = portalCorners(portal);
+            CullingPlane[] planes = new CullingPlane[4];
+            for (int i = 0; i < corners.length; i++) {
+                Vec3d a = corners[i].subtract(camera);
+                Vec3d b = corners[(i + 1) % corners.length].subtract(camera);
+                Vec3d normal = a.crossProduct(b);
+                if (normal.lengthSquared() <= 1.0E-10D) {
+                    return null;
+                }
+
+                normal = normal.normalize();
+                if (normal.dotProduct(insideDirection) < 0.0D) {
+                    normal = normal.multiply(-1.0D);
+                }
+                planes[i] = CullingPlane.fromPointNormal(camera, normal);
+            }
+
+            return new InnerPortalFrustum(planes);
+        }
+
+        private boolean isFullyOutside(
+                double minX,
+                double minY,
+                double minZ,
+                double maxX,
+                double maxY,
+                double maxZ
+        ) {
+            for (CullingPlane plane : planes) {
+                if (plane.maxSignedDistance(minX, minY, minZ, maxX, maxY, maxZ) < -INNER_FRUSTUM_CULL_EPSILON) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private record CullingPlane(double x, double y, double z, double w) {
+        private static CullingPlane fromPointNormal(Vec3d point, Vec3d normal) {
+            return new CullingPlane(
+                    normal.x,
+                    normal.y,
+                    normal.z,
+                    -normal.dotProduct(point)
+            );
+        }
+
+        private double maxSignedDistance(
+                double minX,
+                double minY,
+                double minZ,
+                double maxX,
+                double maxY,
+                double maxZ
+        ) {
+            double px = x >= 0.0D ? maxX : minX;
+            double py = y >= 0.0D ? maxY : minY;
+            double pz = z >= 0.0D ? maxZ : minZ;
+            return x * px + y * py + z * pz + w;
+        }
+    }
+
+    private record SectionKey(int x, int y, int z) {
+        private static SectionKey fromLocalPos(BlockPos pos) {
+            return new SectionKey(
+                    Math.floorDiv(pos.getX(), SCENE_SECTION_SIZE),
+                    Math.floorDiv(pos.getY(), SCENE_SECTION_SIZE),
+                    Math.floorDiv(pos.getZ(), SCENE_SECTION_SIZE)
+            );
+        }
+
+        private int minBlockX() {
+            return x * SCENE_SECTION_SIZE;
+        }
+
+        private int minBlockY() {
+            return y * SCENE_SECTION_SIZE;
+        }
+
+        private int minBlockZ() {
+            return z * SCENE_SECTION_SIZE;
+        }
+    }
+
     private record SceneCacheKey(
             String sceneName,
             int blockCount,
@@ -879,12 +1129,28 @@ public final class PortalSceneRenderer {
     }
 
     private record CachedScene(
-            List<CachedLayerMesh> meshes,
+            List<CachedSection> sections,
             List<CachedPortalBlockEntity> blockEntities
     ) implements AutoCloseable {
         private CachedScene {
-            meshes = List.copyOf(meshes);
+            sections = List.copyOf(sections);
             blockEntities = List.copyOf(blockEntities);
+        }
+
+        @Override
+        public void close() {
+            for (CachedSection section : sections) {
+                section.close();
+            }
+        }
+    }
+
+    private record CachedSection(
+            SectionKey sectionKey,
+            List<CachedLayerMesh> meshes
+    ) implements AutoCloseable {
+        private CachedSection {
+            meshes = List.copyOf(meshes);
         }
 
         @Override
@@ -913,6 +1179,23 @@ public final class PortalSceneRenderer {
             Vec3d localMin,
             int light
     ) {
+    }
+
+    private static final class SectionBuildContext {
+        private final SectionKey sectionKey;
+        private final Map<RenderLayer, MeshBuildContext> meshBuilders = new LinkedHashMap<>();
+
+        private SectionBuildContext(SectionKey sectionKey) {
+            this.sectionKey = sectionKey;
+        }
+
+        private SectionKey sectionKey() {
+            return sectionKey;
+        }
+
+        private Map<RenderLayer, MeshBuildContext> meshBuilders() {
+            return meshBuilders;
+        }
     }
 
     private static final class MeshBuildContext implements AutoCloseable {

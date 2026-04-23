@@ -36,14 +36,15 @@ public final class PortalManager {
         Vec3d desiredCenter = player.getEyePos().add(normal.multiply(PORTAL_FORWARD_DISTANCE));
         Vec3d center = alignPortalCenterToBlockGrid(desiredCenter, normal);
         double eyeOffsetY = player.getEyeY() - player.getY();
-        // Scene anchor = portal center. Blocks are placed at (center + relX, center + relY, center + relZ)
-        // using world-space axes (east/up/south), so the scene is world-aligned regardless of portal facing.
-        // Snapshot relY is captured from block-position Y (feet-level), so we shift anchor down by eye offset
-        // to keep the viewed scene height aligned with what the player saw at capture time.
+        // Capture center is conceptually at block center (x/z + 0.5). Stored scene blocks are integer minima,
+        // so we shift scene anchor by -0.5 on x/z to match that center convention at render time.
+        double anchorX = Math.floor(center.x);
+        double anchorZ = Math.floor(center.z);
+
+        // Snapshot relY is captured from block-position Y (feet-level), so shift down by eye offset.
         // Tiny bias along portal normal avoids z-fighting with the portal plane itself.
-        Vec3d sceneAnchor = center
-                .add(normal.multiply(0.01D))
-                .add(0.0D, -eyeOffsetY, 0.0D);
+        Vec3d sceneAnchor = new Vec3d(anchorX, center.y - eyeOffsetY, anchorZ)
+                .add(normal.multiply(0.01D));
 
         List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
         List<PortalLightSample> lightSamples = prepareLightSamples(snapshot);
