@@ -1,6 +1,7 @@
 package padej.client.render;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.block.BlockState;
@@ -10,6 +11,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.VertexBuffer;
 import net.minecraft.client.gl.Framebuffer;
 import net.minecraft.client.gl.ShaderProgram;
+import net.minecraft.client.gl.SimpleFramebuffer;
 import net.minecraft.client.render.Frustum;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
@@ -24,14 +26,17 @@ import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.render.VertexFormat;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.render.block.BlockRenderManager;
+import net.minecraft.client.render.block.entity.BlockEntityRenderDispatcher;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.util.BufferAllocator;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.client.world.ClientWorld;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.random.Random;
+import org.jetbrains.annotations.Nullable;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15C;
@@ -41,8 +46,11 @@ import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalManager;
 import padej.client.portal.PortalRenderBlock;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,16 +60,37 @@ public final class PortalSceneRenderer {
     private static final int SCENE_SECTION_SIZE = 16;
     private static final int OUTER_STENCIL_VALUE = 0;
     private static final int THIS_PORTAL_STENCIL_VALUE = 1;
+    private static final int MAX_SCENE_SECTIONS_BUILD_PER_FRAME = 4;
     private static final double UNLIMITED_BLOCK_RENDER_DISTANCE_SQ = Double.POSITIVE_INFINITY;
     private static final double PORTAL_FRONT_CLIP_EPSILON = 1.0E-3D;
     private static final double PORTAL_VIEW_MARGIN = 0.5D;
     private static final double INNER_FRUSTUM_CULL_EPSILON = 1.0E-4D;
+    private static final String[] IRIS_WORLD_RENDERER_PIPELINE_FIELD_CANDIDATES = {
+            "pipeline",
+            "renderingPipeline",
+            "worldRenderingPipeline"
+    };
+    @Nullable
+    private static Field irisWorldRendererPipelineField;
+    private static boolean irisWorldRendererPipelineFieldResolved = false;
 
     private final PortalManager portalManager;
     private final Map<SceneCacheKey, CachedScene> cachedScenes = new HashMap<>();
     private boolean stencilReadyThisFrame = false;
+    private boolean irisModeThisFrame = false;
     private boolean stencilUnavailableLogged = false;
     private boolean fallbackModeLogged = false;
+    private boolean irisFallbackLogged = false;
+    private boolean irisPipelineBypassUnavailableLogged = false;
+    private boolean irisPipelineBypassRestoreFailedLogged = false;
+    private boolean irisCompositeShaderMissingLogged = false;
+    private boolean irisCompositeShaderInvalidLogged = false;
+    private boolean layerShaderInvalidLogged = false;
+    @Nullable
+    private SimpleFramebuffer irisPortalFramebuffer;
+    private int irisPortalFramebufferWidth = -1;
+    private int irisPortalFramebufferHeight = -1;
+    private long renderFrameIndex = 0L;
 
     public PortalSceneRenderer(PortalManager portalManager) {
         this.portalManager = portalManager;
@@ -69,8 +98,23 @@ public final class PortalSceneRenderer {
 
     public void register() {
         WorldRenderEvents.START.register(this::prepareFrame);
-        WorldRenderEvents.AFTER_ENTITIES.register(this::renderPortals);
+        WorldRenderEvents.AFTER_ENTITIES.register(this::renderPortalsAfterEntities);
+        WorldRenderEvents.LAST.register(this::renderPortalsLast);
         WorldRenderEvents.END.register(this::endFrame);
+    }
+
+    private void renderPortalsAfterEntities(WorldRenderContext context) {
+        if (irisModeThisFrame) {
+            return;
+        }
+        renderPortals(context);
+    }
+
+    private void renderPortalsLast(WorldRenderContext context) {
+        if (!irisModeThisFrame) {
+            return;
+        }
+        renderPortals(context);
     }
 
     private void prepareFrame(WorldRenderContext context) {
@@ -82,6 +126,20 @@ public final class PortalSceneRenderer {
         if (camera == null) {
             PortalOuterFrustumCulling.clear();
             stencilReadyThisFrame = false;
+            irisModeThisFrame = false;
+            return;
+        }
+
+        irisModeThisFrame = isIrisShaderPackInUse();
+        List<PortalInstance> cullingPortals = sortedPortals(camera)
+                .stream()
+                .filter(portal -> isPortalValidForRendering(portal, camera))
+                .filter(portal -> cameraForward == null || isPortalInViewHemisphere(portal, camera, cameraForward))
+                .toList();
+        PortalOuterFrustumCulling.update(cullingPortals, camera);
+
+        if (irisModeThisFrame) {
+            stencilReadyThisFrame = false;
             return;
         }
 
@@ -90,13 +148,6 @@ public final class PortalSceneRenderer {
             PortalOuterFrustumCulling.clear();
             return;
         }
-
-        List<PortalInstance> cullingPortals = sortedPortals(camera)
-                .stream()
-                .filter(portal -> isPortalValidForRendering(portal, camera))
-                .filter(portal -> cameraForward == null || isPortalInViewHemisphere(portal, camera, cameraForward))
-                .toList();
-        PortalOuterFrustumCulling.update(cullingPortals, camera);
 
         framebuffer.beginWrite(false);
         GL11.glEnable(GL11.GL_STENCIL_TEST);
@@ -126,6 +177,7 @@ public final class PortalSceneRenderer {
         }
 
         float tickDelta = context.tickCounter().getTickDelta(false);
+        renderFrameIndex++;
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -139,6 +191,13 @@ public final class PortalSceneRenderer {
 
             if (cachedScenes.size() > 128) {
                 clearCachedScenes();
+            }
+
+            if (irisModeThisFrame) {
+                // Temporary Iris compatibility mode:
+                // do not render portal planes/content while shader pack pipeline is active.
+                drawPortalFrames(portals, matrix);
+                return;
             }
 
             if (!stencilReadyThisFrame) {
@@ -184,11 +243,17 @@ public final class PortalSceneRenderer {
         PortalOuterFrustumCulling.clear();
         if (stencilReadyThisFrame) {
             GL11.glDisable(GL11.GL_STENCIL_TEST);
-            RenderSystem.colorMask(true, true, true, true);
-            RenderSystem.depthMask(true);
-            RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        } else if (GL11.glIsEnabled(GL11.GL_STENCIL_TEST)) {
+            GL11.glDisable(GL11.GL_STENCIL_TEST);
         }
+        RenderSystem.colorMask(true, true, true, true);
+        RenderSystem.depthMask(true);
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        RenderSystem.enableDepthTest();
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
         stencilReadyThisFrame = false;
+        irisModeThisFrame = false;
     }
 
     private List<PortalInstance> sortedPortals(Vec3d camera) {
@@ -305,7 +370,7 @@ public final class PortalSceneRenderer {
         // World-aligned mode: blocks are placed along world axes, not along portal normal,
         // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
         // The stencil + depth buffer together handle correct visibility - no plane clip needed.
-        renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
+        renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, null);
     }
 
     private void renderPortalSkyBackground(PortalInstance portal, Matrix4f matrix, Vec3d skyColor) {
@@ -361,7 +426,10 @@ public final class PortalSceneRenderer {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
-        GL11.glDisable(GL11.GL_STENCIL_TEST);
+        boolean stencilWasEnabled = GL11.glIsEnabled(GL11.GL_STENCIL_TEST);
+        if (stencilWasEnabled) {
+            GL11.glDisable(GL11.GL_STENCIL_TEST);
+        }
 
         BufferBuilder lines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
         for (PortalInstance portal : portals) {
@@ -369,7 +437,9 @@ public final class PortalSceneRenderer {
         }
         BufferRenderer.drawWithGlobalProgram(lines.end());
 
-        GL11.glEnable(GL11.GL_STENCIL_TEST);
+        if (stencilWasEnabled) {
+            GL11.glEnable(GL11.GL_STENCIL_TEST);
+        }
     }
 
     private void renderDebugPlanes(List<DebugPlaneInstance> debugPlanes, Matrix4f matrix) {
@@ -445,6 +515,275 @@ public final class PortalSceneRenderer {
         RenderSystem.enableCull();
     }
 
+    private void renderUsingIrisFramebuffer(
+            List<PortalInstance> portals,
+            Vec3d camera,
+            Vec3d cameraForward,
+            Frustum frustum,
+            float tickDelta,
+            Matrix4f viewMatrix
+    ) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        Framebuffer mainFramebuffer = client.getFramebuffer();
+        if (!ensureIrisPortalFramebuffer(client) || irisPortalFramebuffer == null) {
+            if (!irisFallbackLogged) {
+                System.err.println("[Protocol Portals] Iris fallback framebuffer is unavailable, using non-stencil fallback path.");
+                irisFallbackLogged = true;
+            }
+            renderFallbackWithoutStencil(
+                    portals,
+                    camera,
+                    cameraForward,
+                    frustum,
+                    tickDelta,
+                    UNLIMITED_BLOCK_RENDER_DISTANCE_SQ,
+                    viewMatrix
+            );
+            return;
+        }
+
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        RenderSystem.enableCull();
+        ShaderProgram compositeShader = getValidPortalCompositeShader();
+        if (compositeShader == null) {
+            renderFallbackWithoutStencil(
+                    portals,
+                    camera,
+                    cameraForward,
+                    frustum,
+                    tickDelta,
+                    UNLIMITED_BLOCK_RENDER_DISTANCE_SQ,
+                    viewMatrix
+            );
+            return;
+        }
+
+        int framebufferWidth = client.getWindow().getFramebufferWidth();
+        int framebufferHeight = client.getWindow().getFramebufferHeight();
+        for (PortalInstance portal : portals) {
+            if (!isPortalValidForRendering(portal, camera, cameraForward, frustum)) {
+                continue;
+            }
+
+            Vec3d skyColor = portal.skyColor();
+            irisPortalFramebuffer.setClearColor((float) skyColor.x, (float) skyColor.y, (float) skyColor.z, 1.0F);
+            irisPortalFramebuffer.beginWrite(true);
+            irisPortalFramebuffer.clear(MinecraftClient.IS_SYSTEM_MAC);
+            renderPortalBlocksWithIrisPipelineBypass(portal, camera, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ);
+
+            mainFramebuffer.beginWrite(true);
+            compositeIrisPortalFramebuffer(portal, viewMatrix, framebufferWidth, framebufferHeight, compositeShader);
+        }
+
+        mainFramebuffer.beginWrite(true);
+        drawPortalFrames(portals, viewMatrix);
+        RenderSystem.enableCull();
+    }
+
+    private void prepareDepthForIrisComposite(PortalInstance portal, Matrix4f viewMatrix) {
+        RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
+        RenderSystem.enableDepthTest();
+        RenderSystem.colorMask(false, false, false, false);
+        RenderSystem.depthMask(true);
+        RenderSystem.depthFunc(GL11.GL_ALWAYS);
+        GL11.glDepthRange(1.0D, 1.0D);
+        drawPortalPlaneQuadWithoutCull(portal, viewMatrix, 0, 0, 0, 0);
+        GL11.glDepthRange(0.0D, 1.0D);
+        RenderSystem.colorMask(true, true, true, true);
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+    }
+
+    private void compositeIrisPortalFramebuffer(
+            PortalInstance portal,
+            Matrix4f viewMatrix,
+            int framebufferWidth,
+            int framebufferHeight,
+            ShaderProgram compositeShader
+    ) {
+        if (irisPortalFramebuffer == null) {
+            return;
+        }
+        int colorAttachment = irisPortalFramebuffer.getColorAttachment();
+        if (colorAttachment <= 0) {
+            return;
+        }
+
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthFunc(GL11.GL_ALWAYS);
+        RenderSystem.depthMask(false);
+        RenderSystem.setShader(() -> compositeShader);
+        RenderSystem.setShaderTexture(0, colorAttachment);
+        if (compositeShader.screenSize != null) {
+            compositeShader.screenSize.set((float) framebufferWidth, (float) framebufferHeight);
+        }
+        drawPortalPlaneQuadWithoutCull(portal, viewMatrix, 255, 255, 255, 255);
+        RenderSystem.depthMask(true);
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+    }
+
+    @Nullable
+    private ShaderProgram getValidPortalCompositeShader() {
+        ShaderProgram compositeShader = ProtocolPortalsShaders.portalCompositeProgram();
+        if (compositeShader == null) {
+            if (!irisCompositeShaderMissingLogged) {
+                System.err.println("[Protocol Portals] portalCompositeProgram is null under Iris (shader reload may be in progress).");
+                irisCompositeShaderMissingLogged = true;
+            }
+            return null;
+        }
+        if (compositeShader.getGlRef() <= 0) {
+            if (!irisCompositeShaderInvalidLogged) {
+                System.err.println("[Protocol Portals] portalCompositeProgram has invalid GL handle under Iris.");
+                irisCompositeShaderInvalidLogged = true;
+            }
+            return null;
+        }
+        irisCompositeShaderMissingLogged = false;
+        irisCompositeShaderInvalidLogged = false;
+        return compositeShader;
+    }
+
+    private boolean ensureIrisPortalFramebuffer(MinecraftClient client) {
+        int framebufferWidth = client.getWindow().getFramebufferWidth();
+        int framebufferHeight = client.getWindow().getFramebufferHeight();
+        if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+            return false;
+        }
+
+        if (irisPortalFramebuffer == null) {
+            irisPortalFramebuffer = new SimpleFramebuffer(framebufferWidth, framebufferHeight, true, MinecraftClient.IS_SYSTEM_MAC);
+            irisPortalFramebufferWidth = framebufferWidth;
+            irisPortalFramebufferHeight = framebufferHeight;
+            return true;
+        }
+
+        if (irisPortalFramebufferWidth != framebufferWidth || irisPortalFramebufferHeight != framebufferHeight) {
+            irisPortalFramebuffer.resize(framebufferWidth, framebufferHeight, MinecraftClient.IS_SYSTEM_MAC);
+            irisPortalFramebufferWidth = framebufferWidth;
+            irisPortalFramebufferHeight = framebufferHeight;
+        }
+        return true;
+    }
+
+    private void renderPortalBlocksWithIrisPipelineBypass(
+            PortalInstance portal,
+            Vec3d camera,
+            float tickDelta,
+            double maxBlockRenderDistanceSq
+    ) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        Field pipelineField = getIrisWorldRendererPipelineField(client);
+        if (pipelineField == null) {
+            if (!irisPipelineBypassUnavailableLogged) {
+                System.err.println("[Protocol Portals] Iris pipeline bypass is unavailable; portal offscreen framebuffer may render empty.");
+                irisPipelineBypassUnavailableLogged = true;
+            }
+            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
+            return;
+        }
+
+        Object originalPipeline;
+        try {
+            originalPipeline = pipelineField.get(client.worldRenderer);
+        } catch (IllegalAccessException exception) {
+            if (!irisPipelineBypassUnavailableLogged) {
+                System.err.println("[Protocol Portals] Cannot access Iris world-render pipeline field; rendering without bypass.");
+                irisPipelineBypassUnavailableLogged = true;
+            }
+            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
+            return;
+        }
+
+        boolean pipelineDisabled = false;
+        if (originalPipeline != null) {
+            try {
+                pipelineField.set(client.worldRenderer, null);
+                pipelineDisabled = true;
+            } catch (IllegalAccessException exception) {
+                if (!irisPipelineBypassUnavailableLogged) {
+                    System.err.println("[Protocol Portals] Cannot disable Iris world-render pipeline; rendering without bypass.");
+                    irisPipelineBypassUnavailableLogged = true;
+                }
+            }
+        }
+
+        try {
+            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
+        } finally {
+            if (pipelineDisabled) {
+                try {
+                    pipelineField.set(client.worldRenderer, originalPipeline);
+                } catch (IllegalAccessException exception) {
+                    if (!irisPipelineBypassRestoreFailedLogged) {
+                        System.err.println("[Protocol Portals] Failed to restore Iris world-render pipeline after portal render.");
+                        irisPipelineBypassRestoreFailedLogged = true;
+                    }
+                }
+            }
+        }
+    }
+
+    @Nullable
+    private static Field getIrisWorldRendererPipelineField(MinecraftClient client) {
+        if (client.worldRenderer == null) {
+            return null;
+        }
+        if (irisWorldRendererPipelineFieldResolved) {
+            return irisWorldRendererPipelineField;
+        }
+        irisWorldRendererPipelineFieldResolved = true;
+        Class<?> worldRendererClass = client.worldRenderer.getClass();
+        for (String candidateName : IRIS_WORLD_RENDERER_PIPELINE_FIELD_CANDIDATES) {
+            Field candidateField = findFieldInHierarchy(worldRendererClass, candidateName);
+            if (candidateField != null && isLikelyIrisPipelineFieldType(candidateField.getType())) {
+                irisWorldRendererPipelineField = candidateField;
+                break;
+            }
+        }
+        return irisWorldRendererPipelineField;
+    }
+
+    private static boolean isLikelyIrisPipelineFieldType(Class<?> fieldType) {
+        String typeName = fieldType.getName();
+        String lowerCaseTypeName = typeName.toLowerCase(java.util.Locale.ROOT);
+        return lowerCaseTypeName.contains("iris")
+                || lowerCaseTypeName.contains("pipeline");
+    }
+
+    @Nullable
+    private static Field findFieldInHierarchy(Class<?> clazz, String fieldName) {
+        Class<?> currentClass = clazz;
+        while (currentClass != null) {
+            try {
+                Field field = currentClass.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException ignored) {
+                currentClass = currentClass.getSuperclass();
+            } catch (LinkageError exception) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isIrisShaderPackInUse() {
+        if (!FabricLoader.getInstance().isModLoaded("iris")) {
+            return false;
+        }
+        try {
+            Class<?> irisApiClass = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
+            Object irisApi = irisApiClass.getMethod("getInstance").invoke(null);
+            Object shaderPackInUse = irisApiClass.getMethod("isShaderPackInUse").invoke(irisApi);
+            return shaderPackInUse instanceof Boolean enabled && enabled;
+        } catch (ReflectiveOperationException | LinkageError exception) {
+            return false;
+        }
+    }
+
     private void renderFallbackWithoutStencil(
             List<PortalInstance> portals,
             Vec3d camera,
@@ -467,7 +806,7 @@ public final class PortalSceneRenderer {
             if (!isPortalValidForRendering(portal, camera, cameraForward, frustum)) {
                 continue;
             }
-            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
+            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, null);
         }
 
         drawPortalFrames(portals, viewMatrix);
@@ -479,7 +818,8 @@ public final class PortalSceneRenderer {
             Vec3d camera,
             boolean clipAgainstPortalPlane,
             float tickDelta,
-            double maxBlockRenderDistanceSq
+            double maxBlockRenderDistanceSq,
+            @Nullable Framebuffer forceFramebuffer
     ) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.world == null || client.player == null) {
@@ -502,6 +842,9 @@ public final class PortalSceneRenderer {
         float chunkOffsetX = (float) (portal.sceneAnchor().x - camera.x);
         float chunkOffsetY = (float) (portal.sceneAnchor().y - camera.y);
         float chunkOffsetZ = (float) (portal.sceneAnchor().z - camera.z);
+        Matrix4f shiftedModelViewMatrix = new Matrix4f(RenderSystem.getModelViewMatrix());
+        shiftedModelViewMatrix.translate(chunkOffsetX, chunkOffsetY, chunkOffsetZ);
+        Matrix4f projectionMatrix = new Matrix4f(RenderSystem.getProjectionMatrix());
 
         int renderedMeshes = 0;
         for (CachedSection section : cachedScene.sections()) {
@@ -519,32 +862,27 @@ public final class PortalSceneRenderer {
 
             for (CachedLayerMesh mesh : section.meshes()) {
                 mesh.layer().startDrawing();
+                if (forceFramebuffer != null) {
+                    forceFramebuffer.beginWrite(false);
+                }
                 try {
                     ShaderProgram shader = RenderSystem.getShader();
                     if (shader == null) {
                         continue;
                     }
-
-                    shader.initializeUniforms(
-                            mesh.layer().getDrawMode(),
-                            RenderSystem.getModelViewMatrix(),
-                            RenderSystem.getProjectionMatrix(),
-                            client.getWindow()
-                    );
-                    shader.bind();
-                    try {
-                        if (shader.chunkOffset != null) {
-                            shader.chunkOffset.set(chunkOffsetX, chunkOffsetY, chunkOffsetZ);
-                            shader.chunkOffset.upload();
+                    if (shader.getGlRef() <= 0) {
+                        if (!layerShaderInvalidLogged) {
+                            System.err.println("[Protocol Portals] Layer shader has invalid GL program handle under Iris, skipping portal mesh draw.");
+                            layerShaderInvalidLogged = true;
                         }
+                        continue;
+                    }
+
+                    try {
                         mesh.vertexBuffer().bind();
-                        mesh.vertexBuffer().draw();
+                        mesh.vertexBuffer().draw(shiftedModelViewMatrix, projectionMatrix, shader);
                         renderedMeshes++;
                     } finally {
-                        if (shader.chunkOffset != null) {
-                            shader.chunkOffset.set(0.0F, 0.0F, 0.0F);
-                        }
-                        shader.unbind();
                         VertexBuffer.unbind();
                     }
                 } finally {
@@ -602,8 +940,11 @@ public final class PortalSceneRenderer {
     }
 
     private static ShaderProgram getPortalAreaShader() {
+        if (isIrisShaderPackInUse()) {
+            return GameRenderer.getPositionColorProgram();
+        }
         ShaderProgram program = ProtocolPortalsShaders.portalAreaProgram();
-        if (program != null) {
+        if (program != null && program.getGlRef() > 0) {
             return program;
         }
         return GameRenderer.getPositionColorProgram();
@@ -811,31 +1152,57 @@ public final class PortalSceneRenderer {
     private CachedScene getOrBuildCachedScene(MinecraftClient client, PortalInstance portal) {
         SceneCacheKey key = SceneCacheKey.fromPortal(portal);
         CachedScene cachedScene = cachedScenes.get(key);
-        if (cachedScene != null) {
-            return cachedScene;
+        if (cachedScene == null) {
+            cachedScene = createPendingCachedScene(client, portal);
+            cachedScenes.put(key, cachedScene);
         }
-
-        CachedScene builtScene = buildCachedScene(client, portal);
-        cachedScenes.put(key, builtScene);
-        return builtScene;
+        cachedScene.buildNextBatch(client, renderFrameIndex, MAX_SCENE_SECTIONS_BUILD_PER_FRAME);
+        return cachedScene;
     }
 
-    private static CachedScene buildCachedScene(MinecraftClient client, PortalInstance portal) {
+    private static CachedScene createPendingCachedScene(MinecraftClient client, PortalInstance portal) {
         if (client.world == null) {
-            return new CachedScene(List.of(), List.of());
+            return CachedScene.completed();
         }
 
-        SceneBlockRenderView sceneView = SceneBlockRenderView.fromPortal(client, portal);
-        BlockRenderManager blockRenderManager = client.getBlockRenderManager();
-        var blockEntityRenderDispatcher = client.getBlockEntityRenderDispatcher();
-        Random random = Random.create();
+        LinkedHashMap<SectionKey, List<PortalRenderBlock>> blocksBySection = new LinkedHashMap<>();
+        for (PortalRenderBlock block : portal.renderBlocks()) {
+            if (block.state().isAir()) {
+                continue;
+            }
+            BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
+            SectionKey sectionKey = SectionKey.fromLocalPos(localPos);
+            blocksBySection.computeIfAbsent(sectionKey, unused -> new ArrayList<>()).add(block);
+        }
+
+        Deque<SectionBuildPlan> pendingSections = new ArrayDeque<>(blocksBySection.size());
+        for (Map.Entry<SectionKey, List<PortalRenderBlock>> entry : blocksBySection.entrySet()) {
+            pendingSections.addLast(new SectionBuildPlan(entry.getKey(), List.copyOf(entry.getValue())));
+        }
+
+        return new CachedScene(
+                client.world,
+                SceneBlockRenderView.fromPortal(client, portal),
+                pendingSections
+        );
+    }
+
+    private static SectionBuildResult buildSectionMeshes(
+            ClientWorld world,
+            SceneBlockRenderView sceneView,
+            BlockRenderManager blockRenderManager,
+            BlockEntityRenderDispatcher blockEntityRenderDispatcher,
+            Random random,
+            SectionBuildPlan sectionPlan
+    ) {
+        SectionKey sectionKey = sectionPlan.sectionKey();
         MatrixStack buildMatrices = new MatrixStack();
-        Map<SectionKey, SectionBuildContext> sectionBuilders = new LinkedHashMap<>();
+        Map<RenderLayer, MeshBuildContext> meshBuilders = new LinkedHashMap<>();
         List<MeshBuildContext> meshContexts = new ArrayList<>();
         List<CachedPortalBlockEntity> blockEntities = new ArrayList<>();
 
         try {
-            for (PortalRenderBlock block : portal.renderBlocks()) {
+            for (PortalRenderBlock block : sectionPlan.blocks()) {
                 BlockState state = block.state();
                 if (state.isAir()) {
                     continue;
@@ -843,10 +1210,8 @@ public final class PortalSceneRenderer {
 
                 BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
                 Vec3d localMin = block.localBlockPosition();
-                SectionKey sectionKey = SectionKey.fromLocalPos(localPos);
-                SectionBuildContext sectionContext = sectionBuilders.computeIfAbsent(sectionKey, SectionBuildContext::new);
                 RenderLayer layer = RenderLayers.getBlockLayer(state);
-                MeshBuildContext blockMeshContext = sectionContext.meshBuilders().computeIfAbsent(layer, key -> {
+                MeshBuildContext blockMeshContext = meshBuilders.computeIfAbsent(layer, key -> {
                     MeshBuildContext created = createMeshBuildContext(key);
                     meshContexts.add(created);
                     return created;
@@ -869,7 +1234,7 @@ public final class PortalSceneRenderer {
                 FluidState fluidState = state.getFluidState();
                 if (!fluidState.isEmpty()) {
                     RenderLayer fluidLayer = RenderLayers.getFluidLayer(fluidState);
-                    MeshBuildContext fluidMeshContext = sectionContext.meshBuilders().computeIfAbsent(fluidLayer, key -> {
+                    MeshBuildContext fluidMeshContext = meshBuilders.computeIfAbsent(fluidLayer, key -> {
                         MeshBuildContext created = createMeshBuildContext(key);
                         meshContexts.add(created);
                         return created;
@@ -897,9 +1262,9 @@ public final class PortalSceneRenderer {
                     continue;
                 }
 
-                blockEntity.setWorld(client.world);
+                blockEntity.setWorld(world);
                 if (block.blockEntityNbt() != null) {
-                    blockEntity.read(block.blockEntityNbt().copy(), client.world.getRegistryManager());
+                    blockEntity.read(block.blockEntityNbt().copy(), world.getRegistryManager());
                 }
 
                 BlockEntityRenderer<BlockEntity> renderer = blockEntityRenderDispatcher.get(blockEntity);
@@ -913,26 +1278,22 @@ public final class PortalSceneRenderer {
                 }
             }
 
-            List<CachedSection> sections = new ArrayList<>(sectionBuilders.size());
-            for (SectionBuildContext sectionContext : sectionBuilders.values()) {
-                Map<RenderLayer, MeshBuildContext> orderedBuilders = new LinkedHashMap<>(sectionContext.meshBuilders());
-                List<CachedLayerMesh> sectionMeshes = new ArrayList<>(orderedBuilders.size());
+            Map<RenderLayer, MeshBuildContext> orderedBuilders = new LinkedHashMap<>(meshBuilders);
+            List<CachedLayerMesh> sectionMeshes = new ArrayList<>(orderedBuilders.size());
 
-                for (RenderLayer orderedLayer : RenderLayer.getBlockLayers()) {
-                    MeshBuildContext context = orderedBuilders.remove(orderedLayer);
-                    if (context != null) {
-                        addMeshIfPresent(sectionMeshes, orderedLayer, context);
-                    }
-                }
-                for (Map.Entry<RenderLayer, MeshBuildContext> entry : orderedBuilders.entrySet()) {
-                    addMeshIfPresent(sectionMeshes, entry.getKey(), entry.getValue());
-                }
-                if (!sectionMeshes.isEmpty()) {
-                    sections.add(new CachedSection(sectionContext.sectionKey(), sectionMeshes));
+            for (RenderLayer orderedLayer : RenderLayer.getBlockLayers()) {
+                MeshBuildContext context = orderedBuilders.remove(orderedLayer);
+                if (context != null) {
+                    addMeshIfPresent(sectionMeshes, orderedLayer, context);
                 }
             }
+            for (Map.Entry<RenderLayer, MeshBuildContext> entry : orderedBuilders.entrySet()) {
+                addMeshIfPresent(sectionMeshes, entry.getKey(), entry.getValue());
+            }
 
-            return new CachedScene(sections, blockEntities);
+            CachedSection builtSection = sectionMeshes.isEmpty() ? null : new CachedSection(sectionKey, sectionMeshes);
+            return new SectionBuildResult(builtSection, blockEntities);
+
         } finally {
             for (MeshBuildContext context : meshContexts) {
                 context.close();
@@ -1089,13 +1450,93 @@ public final class PortalSceneRenderer {
         }
     }
 
-    private record CachedScene(
-            List<CachedSection> sections,
+    private record SectionBuildPlan(
+            SectionKey sectionKey,
+            List<PortalRenderBlock> blocks
+    ) {
+        private SectionBuildPlan {
+            blocks = List.copyOf(blocks);
+        }
+    }
+
+    private record SectionBuildResult(
+            @Nullable CachedSection section,
             List<CachedPortalBlockEntity> blockEntities
-    ) implements AutoCloseable {
-        private CachedScene {
-            sections = List.copyOf(sections);
+    ) {
+        private SectionBuildResult {
             blockEntities = List.copyOf(blockEntities);
+        }
+    }
+
+    private static final class CachedScene implements AutoCloseable {
+        @Nullable
+        private final ClientWorld world;
+        @Nullable
+        private final SceneBlockRenderView sceneView;
+        private final Deque<SectionBuildPlan> pendingSections;
+        private final List<CachedSection> sections = new ArrayList<>();
+        private final List<CachedPortalBlockEntity> blockEntities = new ArrayList<>();
+        private long lastBuildFrame = Long.MIN_VALUE;
+
+        private CachedScene(
+                @Nullable ClientWorld world,
+                @Nullable SceneBlockRenderView sceneView,
+                Deque<SectionBuildPlan> pendingSections
+        ) {
+            this.world = world;
+            this.sceneView = sceneView;
+            this.pendingSections = new ArrayDeque<>(pendingSections);
+        }
+
+        private static CachedScene completed() {
+            return new CachedScene(null, null, new ArrayDeque<>());
+        }
+
+        private List<CachedSection> sections() {
+            return sections;
+        }
+
+        private List<CachedPortalBlockEntity> blockEntities() {
+            return blockEntities;
+        }
+
+        private void buildNextBatch(MinecraftClient client, long frameIndex, int maxSectionsPerFrame) {
+            if (pendingSections.isEmpty() || maxSectionsPerFrame <= 0) {
+                return;
+            }
+            if (lastBuildFrame == frameIndex) {
+                return;
+            }
+            lastBuildFrame = frameIndex;
+            if (world == null || sceneView == null || client.world != world) {
+                pendingSections.clear();
+                return;
+            }
+
+            BlockRenderManager blockRenderManager = client.getBlockRenderManager();
+            BlockEntityRenderDispatcher blockEntityRenderDispatcher = client.getBlockEntityRenderDispatcher();
+            Random random = Random.create();
+
+            int builtSections = 0;
+            while (builtSections < maxSectionsPerFrame && !pendingSections.isEmpty()) {
+                SectionBuildPlan sectionPlan = pendingSections.removeFirst();
+                SectionBuildResult sectionResult = buildSectionMeshes(
+                        world,
+                        sceneView,
+                        blockRenderManager,
+                        blockEntityRenderDispatcher,
+                        random,
+                        sectionPlan
+                );
+
+                if (sectionResult.section() != null) {
+                    sections.add(sectionResult.section());
+                }
+                if (!sectionResult.blockEntities().isEmpty()) {
+                    blockEntities.addAll(sectionResult.blockEntities());
+                }
+                builtSections++;
+            }
         }
 
         @Override
@@ -1103,6 +1544,9 @@ public final class PortalSceneRenderer {
             for (CachedSection section : sections) {
                 section.close();
             }
+            sections.clear();
+            blockEntities.clear();
+            pendingSections.clear();
         }
     }
 
@@ -1140,23 +1584,6 @@ public final class PortalSceneRenderer {
             Vec3d localMin,
             int light
     ) {
-    }
-
-    private static final class SectionBuildContext {
-        private final SectionKey sectionKey;
-        private final Map<RenderLayer, MeshBuildContext> meshBuilders = new LinkedHashMap<>();
-
-        private SectionBuildContext(SectionKey sectionKey) {
-            this.sectionKey = sectionKey;
-        }
-
-        private SectionKey sectionKey() {
-            return sectionKey;
-        }
-
-        private Map<RenderLayer, MeshBuildContext> meshBuilders() {
-            return meshBuilders;
-        }
     }
 
     private static final class MeshBuildContext implements AutoCloseable {
