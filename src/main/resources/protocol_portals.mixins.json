@@ -6,6 +6,7 @@
   "mixins": [
   ],
   "client": [
+    "client.render.chunk.MixinChunkRenderingDataPreparer",
     "client.render.framebuffer.MixinFramebuffer"
   ],
   "injectors": {

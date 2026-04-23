@@ -73,11 +73,25 @@ public final class PortalSceneRenderer {
     private void prepareFrame(WorldRenderContext context) {
         MinecraftClient client = MinecraftClient.getInstance();
         Framebuffer framebuffer = client.getFramebuffer();
+        Vec3d camera = context.camera() != null ? context.camera().getPos() : null;
+
+        if (camera == null) {
+            PortalOuterFrustumCulling.clear();
+            stencilReadyThisFrame = false;
+            return;
+        }
 
         stencilReadyThisFrame = ensureMainFramebufferStencil(framebuffer);
         if (!stencilReadyThisFrame) {
+            PortalOuterFrustumCulling.clear();
             return;
         }
+
+        List<PortalInstance> cullingPortals = sortedPortals(camera)
+                .stream()
+                .filter(portal -> isPortalValidForRendering(portal, camera))
+                .toList();
+        PortalOuterFrustumCulling.update(cullingPortals, camera);
 
         framebuffer.beginWrite(false);
         GL11.glEnable(GL11.GL_STENCIL_TEST);
@@ -158,6 +172,7 @@ public final class PortalSceneRenderer {
     }
 
     private void endFrame(WorldRenderContext context) {
+        PortalOuterFrustumCulling.clear();
         if (stencilReadyThisFrame) {
             GL11.glDisable(GL11.GL_STENCIL_TEST);
             RenderSystem.colorMask(true, true, true, true);
@@ -242,6 +257,7 @@ public final class PortalSceneRenderer {
         RenderSystem.colorMask(false, false, false, false);
         RenderSystem.depthMask(true);
         RenderSystem.depthFunc(GL11.GL_ALWAYS);
+        GL11.glDepthRange(0.0D, 1.0D);
         GL11.glStencilMask(0x00);
         GL11.glStencilFunc(GL11.GL_EQUAL, THIS_PORTAL_STENCIL_VALUE, 0xFF);
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
