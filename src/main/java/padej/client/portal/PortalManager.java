@@ -1,21 +1,38 @@
 package padej.client.portal;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import net.minecraft.block.BlockState;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.EmptyBlockView;
 import padej.client.scene.SceneSnapshot;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class PortalManager {
     private static final double PORTAL_WIDTH = 3.0D;
     private static final double PORTAL_HEIGHT = 3.0D;
     private static final double PORTAL_FORWARD_DISTANCE = 3.0D;
+    private static final int PORTAL_PREPARE_THREADS = Math.max(2, Runtime.getRuntime().availableProcessors() - 1);
+    private static final Direction[] NEIGHBOR_DIRECTIONS = Direction.values();
+    private static final BlockPos ORIGIN_POS = new BlockPos(0, 0, 0);
 
     private final List<PortalInstance> activePortals = new ArrayList<>();
     private final List<DebugPlaneInstance> debugPlanes = new ArrayList<>();
+    private final ExecutorService portalPrepareExecutor = Executors.newFixedThreadPool(PORTAL_PREPARE_THREADS, runnable -> {
+        Thread thread = new Thread(runnable, "protocol-portals-portal-prepare");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public List<PortalInstance> activePortals() {
         return List.copyOf(activePortals);
@@ -26,6 +43,55 @@ public final class PortalManager {
     }
 
     public PortalInstance createPortal(ClientPlayerEntity player, String sceneName, SceneSnapshot snapshot) {
+        PortalPlacement placement = computePortalPlacement(player, sceneName, snapshot.skyColor());
+        List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
+        List<PortalLightSample> lightSamples = prepareLightSamples(snapshot);
+        PortalInstance portal = new PortalInstance(
+                UUID.randomUUID(),
+                placement.sceneName(),
+                placement.center(),
+                placement.normal(),
+                placement.right(),
+                placement.up(),
+                placement.sceneAnchor(),
+                placement.skyColor(),
+                PORTAL_WIDTH,
+                PORTAL_HEIGHT,
+                renderBlocks,
+                lightSamples
+        );
+        activePortals.add(portal);
+        return portal;
+    }
+
+    public CompletableFuture<PortalInstance> createPortalAsync(
+            MinecraftClient client,
+            ClientPlayerEntity player,
+            String sceneName,
+            SceneSnapshot snapshot
+    ) {
+        PortalPlacement placement = computePortalPlacement(player, sceneName, snapshot.skyColor());
+
+        CompletableFuture<List<PortalRenderBlock>> renderBlocksFuture =
+                CompletableFuture.supplyAsync(() -> prepareRenderBlocks(snapshot), portalPrepareExecutor);
+        CompletableFuture<List<PortalLightSample>> lightSamplesFuture =
+                CompletableFuture.supplyAsync(() -> prepareLightSamples(snapshot), portalPrepareExecutor);
+
+        return renderBlocksFuture.thenCombine(lightSamplesFuture, (renderBlocks, lightSamples) ->
+                new PreparedPortalData(
+                        placement.sceneName(),
+                        placement.center(),
+                        placement.normal(),
+                        placement.right(),
+                        placement.up(),
+                        placement.sceneAnchor(),
+                        placement.skyColor(),
+                        renderBlocks,
+                        lightSamples
+                )).thenCompose(prepared -> enqueuePortalCreation(client, prepared));
+    }
+
+    private static PortalPlacement computePortalPlacement(ClientPlayerEntity player, String sceneName, Vec3d skyColor) {
         PlaneBasis basis = buildVerticalPlaneBasis(player.getYaw());
         Vec3d normal = basis.normal();
         Vec3d right = basis.right();
@@ -44,24 +110,58 @@ public final class PortalManager {
         Vec3d sceneAnchor = new Vec3d(anchorX, center.y - eyeOffsetY, anchorZ)
                 .add(normal.multiply(0.01D));
 
-        List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
-        List<PortalLightSample> lightSamples = prepareLightSamples(snapshot);
-        PortalInstance portal = new PortalInstance(
+        return new PortalPlacement(sceneName, center, normal, right, up, sceneAnchor, skyColor);
+    }
+
+    private CompletableFuture<PortalInstance> enqueuePortalCreation(MinecraftClient client, PreparedPortalData prepared) {
+        CompletableFuture<PortalInstance> result = new CompletableFuture<>();
+        client.execute(() -> {
+            if (client.player == null || client.world == null) {
+                result.completeExceptionally(new IllegalStateException("Client world is unavailable."));
+                return;
+            }
+            PortalInstance portal = new PortalInstance(
                 UUID.randomUUID(),
-                sceneName,
-                center,
-                normal,
-                right,
-                up,
-                sceneAnchor,
-                snapshot.skyColor(),
+                prepared.sceneName(),
+                prepared.center(),
+                prepared.normal(),
+                prepared.right(),
+                prepared.up(),
+                prepared.sceneAnchor(),
+                prepared.skyColor(),
                 PORTAL_WIDTH,
                 PORTAL_HEIGHT,
-                renderBlocks,
-                lightSamples
-        );
-        activePortals.add(portal);
-        return portal;
+                prepared.renderBlocks(),
+                prepared.lightSamples()
+            );
+            activePortals.add(portal);
+            result.complete(portal);
+        });
+        return result;
+    }
+
+    private record PreparedPortalData(
+            String sceneName,
+            Vec3d center,
+            Vec3d normal,
+            Vec3d right,
+            Vec3d up,
+            Vec3d sceneAnchor,
+            Vec3d skyColor,
+            List<PortalRenderBlock> renderBlocks,
+            List<PortalLightSample> lightSamples
+    ) {
+    }
+
+    private record PortalPlacement(
+            String sceneName,
+            Vec3d center,
+            Vec3d normal,
+            Vec3d right,
+            Vec3d up,
+            Vec3d sceneAnchor,
+            Vec3d skyColor
+    ) {
     }
 
     public Optional<PortalInstance> removeNearestPortal(Vec3d position) {
@@ -101,8 +201,18 @@ public final class PortalManager {
         // World-aligned mode: no rotation applied - blocks keep their original world-relative
         // positions (relX = east offset, relY = up offset, relZ = south offset).
         // BlockState is also not rotated since the scene is shown in its original orientation.
+        Long2ObjectOpenHashMap<SceneSnapshot.SceneBlock> blocksByPos =
+                new Long2ObjectOpenHashMap<>(Math.max(16, snapshot.blocks().size()));
+        for (SceneSnapshot.SceneBlock block : snapshot.blocks()) {
+            long key = BlockPos.asLong(block.relX(), block.relY(), block.relZ());
+            blocksByPos.put(key, block);
+        }
+
         List<PortalRenderBlock> out = new ArrayList<>(snapshot.blocks().size());
         for (SceneSnapshot.SceneBlock block : snapshot.blocks()) {
+            if (!shouldKeepSceneBlock(blocksByPos, block)) {
+                continue;
+            }
             out.add(new PortalRenderBlock(
                     new Vec3d(block.relX(), block.relY(), block.relZ()),
                     block.state(),
@@ -111,6 +221,37 @@ public final class PortalManager {
             ));
         }
         return out;
+    }
+
+    private static boolean shouldKeepSceneBlock(
+            Long2ObjectOpenHashMap<SceneSnapshot.SceneBlock> blocksByPos,
+            SceneSnapshot.SceneBlock block
+    ) {
+        if (block.blockEntityNbt() != null) {
+            return true;
+        }
+        if (!isDenseSolidCube(block.state())) {
+            return true;
+        }
+
+        int x = block.relX();
+        int y = block.relY();
+        int z = block.relZ();
+        for (Direction direction : NEIGHBOR_DIRECTIONS) {
+            SceneSnapshot.SceneBlock neighbor = blocksByPos.get(BlockPos.asLong(
+                    x + direction.getOffsetX(),
+                    y + direction.getOffsetY(),
+                    z + direction.getOffsetZ()
+            ));
+            if (neighbor == null || !isDenseSolidCube(neighbor.state())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isDenseSolidCube(BlockState state) {
+        return state.isOpaqueFullCube(EmptyBlockView.INSTANCE, ORIGIN_POS);
     }
 
     private List<PortalLightSample> prepareLightSamples(SceneSnapshot snapshot) {

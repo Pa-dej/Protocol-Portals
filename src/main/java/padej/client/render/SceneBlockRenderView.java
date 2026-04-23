@@ -1,5 +1,7 @@
 package padej.client.render;
 
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
@@ -16,20 +18,18 @@ import padej.client.portal.PortalLightSample;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalRenderBlock;
 
-import java.util.HashMap;
-import java.util.Map;
-
 public final class SceneBlockRenderView implements BlockRenderView {
     private static final BlockState AIR = Blocks.AIR.getDefaultState();
+    private static final int ABSENT_PACKED_LIGHT = -1;
 
     private final ClientWorld world;
-    private final Map<Long, BlockState> statesByPos;
-    private final Map<Long, Integer> packedLightByPos;
+    private final Long2ObjectOpenHashMap<BlockState> statesByPos;
+    private final Long2IntOpenHashMap packedLightByPos;
 
     private SceneBlockRenderView(
             ClientWorld world,
-            Map<Long, BlockState> statesByPos,
-            Map<Long, Integer> packedLightByPos
+            Long2ObjectOpenHashMap<BlockState> statesByPos,
+            Long2IntOpenHashMap packedLightByPos
     ) {
         this.world = world;
         this.statesByPos = statesByPos;
@@ -42,20 +42,21 @@ public final class SceneBlockRenderView implements BlockRenderView {
             throw new IllegalStateException("Client world is required for scene rendering");
         }
 
-        int stateCapacity = Math.max(16, portal.renderBlocks().size() * 2);
-        int lightCapacity = Math.max(16, (portal.renderBlocks().size() + portal.lightSamples().size()) * 2);
-        Map<Long, BlockState> states = new HashMap<>(stateCapacity);
-        Map<Long, Integer> lights = new HashMap<>(lightCapacity);
+        int stateCapacity = Math.max(16, portal.renderBlocks().size());
+        int lightCapacity = Math.max(16, portal.renderBlocks().size() + portal.lightSamples().size());
+        Long2ObjectOpenHashMap<BlockState> states = new Long2ObjectOpenHashMap<>(stateCapacity);
+        Long2IntOpenHashMap lights = new Long2IntOpenHashMap(lightCapacity);
+        lights.defaultReturnValue(ABSENT_PACKED_LIGHT);
         for (PortalRenderBlock block : portal.renderBlocks()) {
             BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
             long key = BlockPos.asLong(localPos.getX(), localPos.getY(), localPos.getZ());
             states.put(key, block.state());
-            lights.merge(key, block.packedLight(), SceneBlockRenderView::maxPackedLight);
+            mergePackedLight(lights, key, block.packedLight());
         }
 
         for (PortalLightSample sample : portal.lightSamples()) {
             long key = BlockPos.asLong(sample.relX(), sample.relY(), sample.relZ());
-            lights.merge(key, sample.packedLight(), SceneBlockRenderView::maxPackedLight);
+            mergePackedLight(lights, key, sample.packedLight());
         }
 
         return new SceneBlockRenderView(world, states, lights);
@@ -68,7 +69,8 @@ public final class SceneBlockRenderView implements BlockRenderView {
 
     @Override
     public BlockState getBlockState(BlockPos pos) {
-        return statesByPos.getOrDefault(BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ()), AIR);
+        BlockState state = statesByPos.get(BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ()));
+        return state == null ? AIR : state;
     }
 
     @Override
@@ -112,8 +114,8 @@ public final class SceneBlockRenderView implements BlockRenderView {
     @Override
     public int getLightLevel(LightType type, BlockPos pos) {
         long key = BlockPos.asLong(pos.getX(), pos.getY(), pos.getZ());
-        Integer packed = packedLightByPos.get(key);
-        if (packed == null) {
+        int packed = packedLightByPos.get(key);
+        if (packed == ABSENT_PACKED_LIGHT) {
             return type == LightType.SKY ? 15 : 0;
         }
 
@@ -124,6 +126,15 @@ public final class SceneBlockRenderView implements BlockRenderView {
             return Math.max(blockLight, getBlockState(pos).getLuminance());
         }
         return skyLight;
+    }
+
+    private static void mergePackedLight(Long2IntOpenHashMap lightsByPos, long key, int packedLight) {
+        int existingPackedLight = lightsByPos.get(key);
+        if (existingPackedLight == ABSENT_PACKED_LIGHT) {
+            lightsByPos.put(key, packedLight);
+            return;
+        }
+        lightsByPos.put(key, maxPackedLight(existingPackedLight, packedLight));
     }
 
     private static int maxPackedLight(int a, int b) {

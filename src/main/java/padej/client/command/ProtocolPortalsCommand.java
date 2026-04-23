@@ -15,6 +15,7 @@ import padej.client.scene.SceneSnapshot;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
 
 public final class ProtocolPortalsCommand {
     private final SceneRepository sceneRepository;
@@ -85,13 +86,14 @@ public final class ProtocolPortalsCommand {
 
     private int createPortal(CommandContext<FabricClientCommandSource> context) {
         FabricClientCommandSource source = context.getSource();
+        MinecraftClient client = source.getClient();
         String fileName = StringArgumentType.getString(context, "fileName");
         if (!sceneRepository.isValidFileName(fileName)) {
             source.sendError(SceneRepository.invalidNameText(fileName));
             return 0;
         }
 
-        if (source.getClient().player == null) {
+        if (client.player == null) {
             source.sendError(Text.literal("You must be in world to create portal."));
             return 0;
         }
@@ -102,10 +104,20 @@ public final class ProtocolPortalsCommand {
             return 0;
         }
 
-        PortalInstance portal = portalManager.createPortal(source.getClient().player, fileName.toLowerCase(Locale.ROOT), scene.get());
-        source.sendFeedback(Text.literal("Portal created for scene '" + fileName + "' at "
-                + formatVec(portal.center().x, portal.center().y, portal.center().z)
-                + ". Render blocks: " + portal.renderBlocks().size()));
+        String normalizedSceneName = fileName.toLowerCase(Locale.ROOT);
+        source.sendFeedback(Text.literal("Preparing portal scene '" + fileName + "' on worker threads..."));
+        portalManager.createPortalAsync(client, client.player, normalizedSceneName, scene.get())
+                .thenAccept(portal -> client.execute(() -> source.sendFeedback(Text.literal(
+                        "Portal created for scene '" + fileName + "' at "
+                                + formatVec(portal.center().x, portal.center().y, portal.center().z)
+                                + ". Render blocks: " + portal.renderBlocks().size()
+                ))))
+                .exceptionally(throwable -> {
+                    Throwable cause = unwrapCompletionCause(throwable);
+                    String message = cause.getMessage() == null ? cause.toString() : cause.getMessage();
+                    client.execute(() -> source.sendError(Text.literal("Portal creation failed: " + message)));
+                    return null;
+                });
         return 1;
     }
 
@@ -170,5 +182,13 @@ public final class ProtocolPortalsCommand {
 
     private static String formatVec(double x, double y, double z) {
         return String.format("(%.2f, %.2f, %.2f)", x, y, z);
+    }
+
+    private static Throwable unwrapCompletionCause(Throwable throwable) {
+        Throwable current = throwable;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 }

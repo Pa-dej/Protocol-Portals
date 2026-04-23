@@ -1177,7 +1177,7 @@ public final class PortalSceneRenderer {
 
         Deque<SectionBuildPlan> pendingSections = new ArrayDeque<>(blocksBySection.size());
         for (Map.Entry<SectionKey, List<PortalRenderBlock>> entry : blocksBySection.entrySet()) {
-            pendingSections.addLast(new SectionBuildPlan(entry.getKey(), List.copyOf(entry.getValue())));
+            pendingSections.addLast(new SectionBuildPlan(entry.getKey(), entry.getValue()));
         }
 
         return new CachedScene(
@@ -1454,9 +1454,6 @@ public final class PortalSceneRenderer {
             SectionKey sectionKey,
             List<PortalRenderBlock> blocks
     ) {
-        private SectionBuildPlan {
-            blocks = List.copyOf(blocks);
-        }
     }
 
     private record SectionBuildResult(

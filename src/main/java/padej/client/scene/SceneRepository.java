@@ -37,7 +37,7 @@ public final class SceneRepository {
     private static final Pattern FILE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final String LEGACY_FILE_EXTENSION = ".nbt";
     private static final int MAX_CAPTURE_CHUNK_RADIUS = 16;
-    private static final boolean CAPTURE_SURFACE_ONLY = false;
+    private static final boolean CAPTURE_SURFACE_ONLY = true;
     private static final int CAPTURED_LOADED_CHUNKS_PER_TICK = 2;
     private static final int UNLOADED_CHUNK_PROBES_PER_TICK = 24;
     private static final int MAX_CAPTURE_WAIT_TICKS = 20 * 90;
