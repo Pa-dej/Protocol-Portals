@@ -11,6 +11,7 @@ import net.minecraft.nbt.NbtSizeTracker;
 import net.minecraft.registry.Registries;
 import net.minecraft.state.property.Property;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Vec3d;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -22,7 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 
 public final class SceneSnapshotIO {
-    private static final int FORMAT_VERSION = 3;
+    private static final int FORMAT_VERSION = 4;
 
     private SceneSnapshotIO() {
     }
@@ -36,6 +37,9 @@ public final class SceneSnapshotIO {
         root.putInt("center_y", snapshot.centerBlockY());
         root.putInt("center_z", snapshot.centerBlockZ());
         root.putFloat("capture_yaw", snapshot.captureYaw());
+        root.putDouble("sky_r", snapshot.skyColor().x);
+        root.putDouble("sky_g", snapshot.skyColor().y);
+        root.putDouble("sky_b", snapshot.skyColor().z);
 
         Map<BlockState, Integer> paletteIndex = new HashMap<>();
         NbtList palette = new NbtList();
@@ -96,6 +100,19 @@ public final class SceneSnapshotIO {
         int centerY = root.getInt("center_y");
         int centerZ = root.getInt("center_z");
         float captureYaw = root.getFloat("capture_yaw");
+        Vec3d skyColor;
+        if (version >= 4
+                && root.contains("sky_r", NbtElement.DOUBLE_TYPE)
+                && root.contains("sky_g", NbtElement.DOUBLE_TYPE)
+                && root.contains("sky_b", NbtElement.DOUBLE_TYPE)) {
+            skyColor = new Vec3d(
+                    root.getDouble("sky_r"),
+                    root.getDouble("sky_g"),
+                    root.getDouble("sky_b")
+            );
+        } else {
+            skyColor = defaultSkyColorForDimension(dimension);
+        }
 
         NbtList paletteNbt = root.getList("palette", NbtElement.COMPOUND_TYPE);
         List<BlockState> palette = new ArrayList<>(paletteNbt.size());
@@ -147,7 +164,7 @@ public final class SceneSnapshotIO {
             }
         }
 
-        return new SceneSnapshot(sceneName, dimension, centerX, centerY, centerZ, captureYaw, blocks, lightSamples);
+        return new SceneSnapshot(sceneName, dimension, centerX, centerY, centerZ, captureYaw, skyColor, blocks, lightSamples);
     }
 
     private static NbtCompound writeState(BlockState state) {
@@ -199,5 +216,15 @@ public final class SceneSnapshotIO {
     @SuppressWarnings("unchecked")
     private static <T extends Comparable<T>> String propertyValueToString(Property<?> property, Comparable<?> value) {
         return ((Property<T>) property).name((T) value);
+    }
+
+    private static Vec3d defaultSkyColorForDimension(String dimensionId) {
+        if ("minecraft:the_nether".equals(dimensionId)) {
+            return new Vec3d(0.2D, 0.03D, 0.03D);
+        }
+        if ("minecraft:the_end".equals(dimensionId)) {
+            return new Vec3d(0.04D, 0.04D, 0.1D);
+        }
+        return new Vec3d(0.62D, 0.73D, 1.0D);
     }
 }

@@ -11,6 +11,7 @@ import net.minecraft.nbt.NbtCompound;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.LightType;
 import net.minecraft.world.chunk.WorldChunk;
 
@@ -204,6 +205,7 @@ public final class SceneRepository {
                 centerY,
                 centerZ,
                 player.getYaw(),
+                captureSkyColor(world, player.getEyePos()),
                 blocks,
                 lightSamples
         );
@@ -270,5 +272,9 @@ public final class SceneRepository {
         }
 
         return false;
+    }
+
+    private static Vec3d captureSkyColor(ClientWorld world, Vec3d cameraPos) {
+        return world.getSkyColor(cameraPos, 1.0F);
     }
 }

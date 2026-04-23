@@ -27,7 +27,6 @@ import net.minecraft.client.render.block.BlockRenderManager;
 import net.minecraft.client.render.block.entity.BlockEntityRenderer;
 import net.minecraft.client.util.BufferAllocator;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.client.world.ClientWorld;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -130,7 +129,6 @@ public final class PortalSceneRenderer {
         float tickDelta = context.tickCounter().getTickDelta(false);
         int currentFps = MinecraftClient.getInstance().getCurrentFps();
         double dynamicBlockRenderDistanceSq = computeDynamicPortalBlockDistanceSq(portals.size(), currentFps);
-        Vec3d portalSkyColor = resolvePortalSkyColor(context.world(), camera, tickDelta);
         matrices.push();
         matrices.translate(-camera.x, -camera.y, -camera.z);
         Matrix4f matrix = new Matrix4f(matrices.peek().getPositionMatrix());
@@ -165,7 +163,7 @@ public final class PortalSceneRenderer {
                 }
 
                 clearDepthOfPortalViewArea(portal, matrix);
-                renderPortalSkyBackground(portalSkyColor);
+                renderPortalSkyBackground(portal, matrix, portal.skyColor());
                 renderPortalContentInStencil(portal, camera, tickDelta, dynamicBlockRenderDistanceSq);
                 restoreDepthOfPortalViewArea(portal, matrix);
                 clampStencilValue(OUTER_STENCIL_VALUE);
@@ -313,7 +311,7 @@ public final class PortalSceneRenderer {
         renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq);
     }
 
-    private void renderPortalSkyBackground(Vec3d skyColor) {
+    private void renderPortalSkyBackground(PortalInstance portal, Matrix4f matrix, Vec3d skyColor) {
         RenderSystem.disableBlend();
         RenderSystem.colorMask(true, true, true, true);
         RenderSystem.depthMask(true);
@@ -322,7 +320,9 @@ public final class PortalSceneRenderer {
         GL11.glStencilFunc(GL11.GL_EQUAL, THIS_PORTAL_STENCIL_VALUE, 0xFF);
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
         GL11.glDepthRange(1.0D, 1.0D);
-        drawScreenTriangle(
+        drawPortalPlaneQuadWithoutCull(
+                portal,
+                matrix,
                 colorToByte(skyColor.x),
                 colorToByte(skyColor.y),
                 colorToByte(skyColor.z),
@@ -787,24 +787,13 @@ public final class PortalSceneRenderer {
     }
 
     private static void drawScreenTriangle() {
-        drawScreenTriangle(255, 255, 255, 255);
-    }
-
-    private static void drawScreenTriangle(int red, int green, int blue, int alpha) {
         RenderSystem.setShader(GameRenderer::getPositionColorProgram);
         Matrix4f identity = new Matrix4f().identity();
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.TRIANGLES, VertexFormats.POSITION_COLOR);
-        buffer.vertex(identity, -1.0F, -1.0F, 0.0F).color(red, green, blue, alpha);
-        buffer.vertex(identity, 3.0F, -1.0F, 0.0F).color(red, green, blue, alpha);
-        buffer.vertex(identity, -1.0F, 3.0F, 0.0F).color(red, green, blue, alpha);
+        buffer.vertex(identity, -1.0F, -1.0F, 0.0F).color(255, 255, 255, 255);
+        buffer.vertex(identity, 3.0F, -1.0F, 0.0F).color(255, 255, 255, 255);
+        buffer.vertex(identity, -1.0F, 3.0F, 0.0F).color(255, 255, 255, 255);
         BufferRenderer.drawWithGlobalProgram(buffer.end());
-    }
-
-    private static Vec3d resolvePortalSkyColor(ClientWorld world, Vec3d camera, float tickDelta) {
-        if (world == null) {
-            return new Vec3d(0.0D, 0.0D, 0.0D);
-        }
-        return world.getSkyColor(camera, tickDelta);
     }
 
     private static int colorToByte(double color) {

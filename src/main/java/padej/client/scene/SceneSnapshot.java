@@ -2,6 +2,7 @@ package padej.client.scene;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
@@ -13,6 +14,7 @@ public final class SceneSnapshot {
     private final int centerBlockY;
     private final int centerBlockZ;
     private final float captureYaw;
+    private final Vec3d skyColor;
     private final List<SceneBlock> blocks;
     private final List<LightSample> lightSamples;
 
@@ -23,6 +25,7 @@ public final class SceneSnapshot {
             int centerBlockY,
             int centerBlockZ,
             float captureYaw,
+            Vec3d skyColor,
             List<SceneBlock> blocks,
             List<LightSample> lightSamples
     ) {
@@ -32,6 +35,7 @@ public final class SceneSnapshot {
         this.centerBlockY = centerBlockY;
         this.centerBlockZ = centerBlockZ;
         this.captureYaw = captureYaw;
+        this.skyColor = skyColor;
         this.blocks = List.copyOf(blocks);
         this.lightSamples = List.copyOf(lightSamples);
     }
@@ -58,6 +62,10 @@ public final class SceneSnapshot {
 
     public float captureYaw() {
         return captureYaw;
+    }
+
+    public Vec3d skyColor() {
+        return skyColor;
     }
 
     public List<SceneBlock> blocks() {

@@ -56,6 +56,7 @@ public final class PortalManager {
                 right,
                 up,
                 sceneAnchor,
+                snapshot.skyColor(),
                 PORTAL_WIDTH,
                 PORTAL_HEIGHT,
                 renderBlocks,

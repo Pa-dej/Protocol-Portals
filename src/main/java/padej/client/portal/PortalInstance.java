@@ -13,6 +13,7 @@ public record PortalInstance(
         Vec3d right,
         Vec3d up,
         Vec3d sceneAnchor,
+        Vec3d skyColor,
         double width,
         double height,
         List<PortalRenderBlock> renderBlocks,
