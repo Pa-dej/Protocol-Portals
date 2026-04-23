@@ -18,6 +18,8 @@ import padej.client.portal.PortalLightSample;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalRenderBlock;
 
+import java.util.List;
+
 public final class SceneBlockRenderView implements BlockRenderView {
     private static final BlockState AIR = Blocks.AIR.getDefaultState();
     private static final int ABSENT_PACKED_LIGHT = -1;
@@ -41,20 +43,27 @@ public final class SceneBlockRenderView implements BlockRenderView {
         if (world == null) {
             throw new IllegalStateException("Client world is required for scene rendering");
         }
+        return fromData(world, portal.renderBlocks(), portal.lightSamples());
+    }
 
-        int stateCapacity = Math.max(16, portal.renderBlocks().size());
-        int lightCapacity = Math.max(16, portal.renderBlocks().size() + portal.lightSamples().size());
+    public static SceneBlockRenderView fromData(
+            ClientWorld world,
+            List<PortalRenderBlock> renderBlocks,
+            List<PortalLightSample> lightSamples
+    ) {
+        int stateCapacity = Math.max(16, renderBlocks.size());
+        int lightCapacity = Math.max(16, renderBlocks.size() + lightSamples.size());
         Long2ObjectOpenHashMap<BlockState> states = new Long2ObjectOpenHashMap<>(stateCapacity);
         Long2IntOpenHashMap lights = new Long2IntOpenHashMap(lightCapacity);
         lights.defaultReturnValue(ABSENT_PACKED_LIGHT);
-        for (PortalRenderBlock block : portal.renderBlocks()) {
+        for (PortalRenderBlock block : renderBlocks) {
             BlockPos localPos = BlockPos.ofFloored(block.localBlockPosition());
             long key = BlockPos.asLong(localPos.getX(), localPos.getY(), localPos.getZ());
             states.put(key, block.state());
             mergePackedLight(lights, key, block.packedLight());
         }
 
-        for (PortalLightSample sample : portal.lightSamples()) {
+        for (PortalLightSample sample : lightSamples) {
             long key = BlockPos.asLong(sample.relX(), sample.relY(), sample.relZ());
             mergePackedLight(lights, key, sample.packedLight());
         }

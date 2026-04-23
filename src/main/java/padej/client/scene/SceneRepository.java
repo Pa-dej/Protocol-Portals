@@ -36,7 +36,9 @@ import java.util.regex.Pattern;
 public final class SceneRepository {
     private static final Pattern FILE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final String LEGACY_FILE_EXTENSION = ".nbt";
+    private static final int MIN_CAPTURE_CHUNK_RADIUS = 2;
     private static final int MAX_CAPTURE_CHUNK_RADIUS = 16;
+    private static final int CAPTURE_BLOCKS_BELOW_PLAYER = 20;
     private static final boolean CAPTURE_SURFACE_ONLY = true;
     private static final int CAPTURED_LOADED_CHUNKS_PER_TICK = 2;
     private static final int UNLOADED_CHUNK_PROBES_PER_TICK = 24;
@@ -46,6 +48,7 @@ public final class SceneRepository {
     private final Path scenesDir;
     private final Map<String, SceneSnapshot> cache = new HashMap<>();
     private final ExecutorService ioExecutor;
+    private volatile int manualCaptureChunkRadius = -1;
     @Nullable
     private CaptureSession activeCapture;
     @Nullable
@@ -104,6 +107,34 @@ public final class SceneRepository {
 
     public Path scenesDir() {
         return scenesDir;
+    }
+
+    public int minCaptureChunkRadius() {
+        return MIN_CAPTURE_CHUNK_RADIUS;
+    }
+
+    public int maxCaptureChunkRadius() {
+        return MAX_CAPTURE_CHUNK_RADIUS;
+    }
+
+    public int manualCaptureChunkRadius() {
+        return manualCaptureChunkRadius;
+    }
+
+    public boolean isManualCaptureChunkRadiusEnabled() {
+        return manualCaptureChunkRadius >= MIN_CAPTURE_CHUNK_RADIUS;
+    }
+
+    public int effectiveCaptureChunkRadius(MinecraftClient client) {
+        return resolveCaptureChunkRadius(client);
+    }
+
+    public void setCaptureChunkRadiusAuto() {
+        manualCaptureChunkRadius = -1;
+    }
+
+    public void setCaptureChunkRadiusManual(int radius) {
+        manualCaptureChunkRadius = clampCaptureChunkRadius(radius);
     }
 
     @Nullable
@@ -178,10 +209,11 @@ public final class SceneRepository {
         int minZ = minChunkZ * 16;
         int maxZ = maxChunkZ * 16 + 15;
 
+        int solidBlockMinY = Math.max(world.getBottomY(), centerY - CAPTURE_BLOCKS_BELOW_PLAYER);
         int minY = world.getBottomY();
         int maxY = world.getTopY() - 1;
         int horizontalRadiusBlocks = captureChunkRadius * 16;
-        int verticalRadiusBlocks = Math.max(centerY - minY, maxY - centerY);
+        int verticalRadiusBlocks = Math.max(centerY - solidBlockMinY, maxY - centerY);
 
         Queue<ChunkPos> pendingChunks = new ArrayDeque<>();
         for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
@@ -195,6 +227,7 @@ public final class SceneRepository {
                 centerX,
                 centerY,
                 centerZ,
+                solidBlockMinY,
                 minX,
                 maxX,
                 minY,
@@ -355,7 +388,12 @@ public final class SceneRepository {
                         continue;
                     }
 
-                    if (CAPTURE_SURFACE_ONLY && !shouldCaptureSolidBlock(
+                    boolean denseFullCube = state.isOpaqueFullCube(session.world, session.mutableWorldPos);
+                    if (denseFullCube && y < session.solidBlockMinY) {
+                        continue;
+                    }
+
+                    if (CAPTURE_SURFACE_ONLY && denseFullCube && !shouldCaptureSolidBlock(
                             session.world,
                             session.mutableWorldPos,
                             session.mutableNeighborPos,
@@ -469,12 +507,21 @@ public final class SceneRepository {
         return (blockLight & 0xFF) | ((skyLight & 0xFF) << 8);
     }
 
-    private static int resolveCaptureChunkRadius(MinecraftClient client) {
+    private int resolveCaptureChunkRadius(MinecraftClient client) {
+        int manual = manualCaptureChunkRadius;
+        if (manual >= MIN_CAPTURE_CHUNK_RADIUS) {
+            return clampCaptureChunkRadius(manual);
+        }
+
         int configuredRadius = MAX_CAPTURE_CHUNK_RADIUS;
         if (client.options != null && client.options.getViewDistance() != null) {
             configuredRadius = client.options.getViewDistance().getValue();
         }
-        return Math.max(2, Math.min(MAX_CAPTURE_CHUNK_RADIUS, configuredRadius));
+        return clampCaptureChunkRadius(configuredRadius);
+    }
+
+    private static int clampCaptureChunkRadius(int radius) {
+        return Math.max(MIN_CAPTURE_CHUNK_RADIUS, Math.min(MAX_CAPTURE_CHUNK_RADIUS, radius));
     }
 
     private void updateCaptureHud(CaptureSession session) {
@@ -569,6 +616,7 @@ public final class SceneRepository {
         private final int centerX;
         private final int centerY;
         private final int centerZ;
+        private final int solidBlockMinY;
         private final int minX;
         private final int maxX;
         private final int minY;
@@ -604,6 +652,7 @@ public final class SceneRepository {
                 int centerX,
                 int centerY,
                 int centerZ,
+                int solidBlockMinY,
                 int minX,
                 int maxX,
                 int minY,
@@ -625,6 +674,7 @@ public final class SceneRepository {
             this.centerX = centerX;
             this.centerY = centerY;
             this.centerZ = centerZ;
+            this.solidBlockMinY = solidBlockMinY;
             this.minX = minX;
             this.maxX = maxX;
             this.minY = minY;

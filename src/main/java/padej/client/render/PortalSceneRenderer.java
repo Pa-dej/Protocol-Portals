@@ -55,6 +55,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class PortalSceneRenderer {
     private static final int SCENE_SECTION_SIZE = 16;
@@ -76,6 +80,14 @@ public final class PortalSceneRenderer {
 
     private final PortalManager portalManager;
     private final Map<SceneCacheKey, CachedScene> cachedScenes = new HashMap<>();
+    private final ExecutorService scenePrepareExecutor = Executors.newFixedThreadPool(
+            Math.max(2, Runtime.getRuntime().availableProcessors() / 2),
+            runnable -> {
+                Thread thread = new Thread(runnable, "protocol-portals-scene-prepare");
+                thread.setDaemon(true);
+                return thread;
+            }
+    );
     private boolean stencilReadyThisFrame = false;
     private boolean irisModeThisFrame = false;
     private boolean stencilUnavailableLogged = false;
@@ -1160,11 +1172,19 @@ public final class PortalSceneRenderer {
         return cachedScene;
     }
 
-    private static CachedScene createPendingCachedScene(MinecraftClient client, PortalInstance portal) {
+    private CachedScene createPendingCachedScene(MinecraftClient client, PortalInstance portal) {
         if (client.world == null) {
             return CachedScene.completed();
         }
+        ClientWorld world = client.world;
+        CompletableFuture<PreparedSceneData> prepareFuture = CompletableFuture.supplyAsync(
+                () -> prepareSceneData(world, portal),
+                scenePrepareExecutor
+        );
+        return CachedScene.preparing(world, prepareFuture);
+    }
 
+    private static PreparedSceneData prepareSceneData(ClientWorld world, PortalInstance portal) {
         LinkedHashMap<SectionKey, List<PortalRenderBlock>> blocksBySection = new LinkedHashMap<>();
         for (PortalRenderBlock block : portal.renderBlocks()) {
             if (block.state().isAir()) {
@@ -1175,15 +1195,13 @@ public final class PortalSceneRenderer {
             blocksBySection.computeIfAbsent(sectionKey, unused -> new ArrayList<>()).add(block);
         }
 
-        Deque<SectionBuildPlan> pendingSections = new ArrayDeque<>(blocksBySection.size());
+        List<SectionBuildPlan> sectionPlans = new ArrayList<>(blocksBySection.size());
         for (Map.Entry<SectionKey, List<PortalRenderBlock>> entry : blocksBySection.entrySet()) {
-            pendingSections.addLast(new SectionBuildPlan(entry.getKey(), entry.getValue()));
+            sectionPlans.add(new SectionBuildPlan(entry.getKey(), entry.getValue()));
         }
-
-        return new CachedScene(
-                client.world,
-                SceneBlockRenderView.fromPortal(client, portal),
-                pendingSections
+        return new PreparedSceneData(
+                SceneBlockRenderView.fromData(world, portal.renderBlocks(), portal.lightSamples()),
+                sectionPlans
         );
     }
 
@@ -1456,6 +1474,12 @@ public final class PortalSceneRenderer {
     ) {
     }
 
+    private record PreparedSceneData(
+            SceneBlockRenderView sceneView,
+            List<SectionBuildPlan> sectionPlans
+    ) {
+    }
+
     private record SectionBuildResult(
             @Nullable CachedSection section,
             List<CachedPortalBlockEntity> blockEntities
@@ -1469,8 +1493,10 @@ public final class PortalSceneRenderer {
         @Nullable
         private final ClientWorld world;
         @Nullable
-        private final SceneBlockRenderView sceneView;
-        private final Deque<SectionBuildPlan> pendingSections;
+        private SceneBlockRenderView sceneView;
+        @Nullable
+        private CompletableFuture<PreparedSceneData> prepareFuture;
+        private final Deque<SectionBuildPlan> pendingSections = new ArrayDeque<>();
         private final List<CachedSection> sections = new ArrayList<>();
         private final List<CachedPortalBlockEntity> blockEntities = new ArrayList<>();
         private long lastBuildFrame = Long.MIN_VALUE;
@@ -1478,15 +1504,19 @@ public final class PortalSceneRenderer {
         private CachedScene(
                 @Nullable ClientWorld world,
                 @Nullable SceneBlockRenderView sceneView,
-                Deque<SectionBuildPlan> pendingSections
+                @Nullable CompletableFuture<PreparedSceneData> prepareFuture
         ) {
             this.world = world;
             this.sceneView = sceneView;
-            this.pendingSections = new ArrayDeque<>(pendingSections);
+            this.prepareFuture = prepareFuture;
         }
 
         private static CachedScene completed() {
-            return new CachedScene(null, null, new ArrayDeque<>());
+            return new CachedScene(null, null, null);
+        }
+
+        private static CachedScene preparing(ClientWorld world, CompletableFuture<PreparedSceneData> prepareFuture) {
+            return new CachedScene(world, null, prepareFuture);
         }
 
         private List<CachedSection> sections() {
@@ -1498,15 +1528,38 @@ public final class PortalSceneRenderer {
         }
 
         private void buildNextBatch(MinecraftClient client, long frameIndex, int maxSectionsPerFrame) {
-            if (pendingSections.isEmpty() || maxSectionsPerFrame <= 0) {
+            if (maxSectionsPerFrame <= 0) {
                 return;
             }
             if (lastBuildFrame == frameIndex) {
                 return;
             }
             lastBuildFrame = frameIndex;
-            if (world == null || sceneView == null || client.world != world) {
+            if (world == null || client.world != world) {
                 pendingSections.clear();
+                sceneView = null;
+                if (prepareFuture != null) {
+                    prepareFuture.cancel(true);
+                    prepareFuture = null;
+                }
+                return;
+            }
+            if (prepareFuture != null) {
+                if (!prepareFuture.isDone()) {
+                    return;
+                }
+                try {
+                    PreparedSceneData preparedSceneData = prepareFuture.join();
+                    sceneView = preparedSceneData.sceneView();
+                    pendingSections.addAll(preparedSceneData.sectionPlans());
+                } catch (CompletionException ignored) {
+                    sceneView = null;
+                    pendingSections.clear();
+                } finally {
+                    prepareFuture = null;
+                }
+            }
+            if (sceneView == null || pendingSections.isEmpty()) {
                 return;
             }
 
@@ -1538,12 +1591,17 @@ public final class PortalSceneRenderer {
 
         @Override
         public void close() {
+            if (prepareFuture != null) {
+                prepareFuture.cancel(true);
+                prepareFuture = null;
+            }
             for (CachedSection section : sections) {
                 section.close();
             }
             sections.clear();
             blockEntities.clear();
             pendingSections.clear();
+            sceneView = null;
         }
     }
 

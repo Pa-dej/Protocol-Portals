@@ -1,6 +1,7 @@
 package padej.client.command;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
@@ -9,6 +10,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.Text;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalManager;
+import padej.client.screen.ProtocolPortalsScreen;
 import padej.client.scene.SceneRepository;
 import padej.client.scene.SceneSnapshot;
 
@@ -43,7 +45,54 @@ public final class ProtocolPortalsCommand {
                                         .executes(this::removeNearestPortal)
                                         .then(ClientCommandManager.argument("fileName", StringArgumentType.word())
                                                 .executes(this::removePortalByName))))
+                        .then(ClientCommandManager.literal("settings")
+                                .then(ClientCommandManager.literal("capture-radius")
+                                        .executes(this::showCaptureRadiusSetting)
+                                        .then(ClientCommandManager.literal("auto")
+                                                .executes(this::setCaptureRadiusAuto))
+                                        .then(ClientCommandManager.argument(
+                                                        "chunks",
+                                                        IntegerArgumentType.integer(
+                                                                sceneRepository.minCaptureChunkRadius(),
+                                                                sceneRepository.maxCaptureChunkRadius()))
+                                                .executes(this::setCaptureRadiusManual))))
+                        .then(ClientCommandManager.literal("menu")
+                                .executes(this::openMenu))
         ));
+    }
+
+    private int openMenu(CommandContext<FabricClientCommandSource> context) {
+        MinecraftClient client = context.getSource().getClient();
+        client.setScreen(new ProtocolPortalsScreen(client.currentScreen, sceneRepository, portalManager));
+        return 1;
+    }
+
+    private int showCaptureRadiusSetting(CommandContext<FabricClientCommandSource> context) {
+        FabricClientCommandSource source = context.getSource();
+        MinecraftClient client = source.getClient();
+        int manual = sceneRepository.manualCaptureChunkRadius();
+        int effective = sceneRepository.effectiveCaptureChunkRadius(client);
+        if (sceneRepository.isManualCaptureChunkRadiusEnabled()) {
+            source.sendFeedback(Text.literal("Capture radius mode: manual (" + manual + " chunks)."));
+        } else {
+            int gameValue = client.options != null && client.options.getViewDistance() != null
+                    ? client.options.getViewDistance().getValue()
+                    : effective;
+            source.sendFeedback(Text.literal("Capture radius mode: auto (game view distance " + gameValue
+                    + ", effective " + effective + " chunks)."));
+        }
+        return 1;
+    }
+
+    private int setCaptureRadiusAuto(CommandContext<FabricClientCommandSource> context) {
+        sceneRepository.setCaptureChunkRadiusAuto();
+        return showCaptureRadiusSetting(context);
+    }
+
+    private int setCaptureRadiusManual(CommandContext<FabricClientCommandSource> context) {
+        int chunks = IntegerArgumentType.getInteger(context, "chunks");
+        sceneRepository.setCaptureChunkRadiusManual(chunks);
+        return showCaptureRadiusSetting(context);
     }
 
     private int createSnapshot(CommandContext<FabricClientCommandSource> context) {
@@ -75,7 +124,8 @@ public final class ProtocolPortalsCommand {
                     error -> source.sendError(Text.literal(error))
             );
             source.sendFeedback(Text.literal("Capture scheduled for " + start.totalChunks()
-                    + " chunks. Processing loaded chunks per tick: " + 2
+                    + " chunks (radius " + (start.horizontalRadius() / 16) + " chunks). "
+                    + "Processing loaded chunks per tick: " + 2
                     + ", unloaded probes per tick: " + 24 + "."));
             return 1;
         } catch (IOException exception) {
