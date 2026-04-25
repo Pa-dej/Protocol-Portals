@@ -8,6 +8,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.EmptyBlockView;
+import org.jetbrains.annotations.Nullable;
 import padej.client.scene.SceneSnapshot;
 
 import java.util.ArrayList;
@@ -43,12 +44,23 @@ public final class PortalManager {
     }
 
     public PortalInstance createPortal(ClientPlayerEntity player, String sceneName, SceneSnapshot snapshot) {
-        PortalPlacement placement = computePortalPlacement(player, sceneName, snapshot.skyColor());
+        return createPortal(player, sceneName, snapshot, null);
+    }
+
+    public PortalInstance createPortal(
+            ClientPlayerEntity player,
+            String sceneName,
+            SceneSnapshot snapshot,
+            @Nullable String serverAddress
+    ) {
+        String normalizedServerAddress = normalizeServerAddress(serverAddress);
+        PortalPlacement placement = computePortalPlacement(player, sceneName, snapshot.skyColor(), normalizedServerAddress);
         List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
         List<PortalLightSample> lightSamples = prepareLightSamples(snapshot);
         PortalInstance portal = new PortalInstance(
                 UUID.randomUUID(),
                 placement.sceneName(),
+                placement.serverAddress(),
                 placement.center(),
                 placement.normal(),
                 placement.right(),
@@ -70,7 +82,18 @@ public final class PortalManager {
             String sceneName,
             SceneSnapshot snapshot
     ) {
-        PortalPlacement placement = computePortalPlacement(player, sceneName, snapshot.skyColor());
+        return createPortalAsync(client, player, sceneName, snapshot, null);
+    }
+
+    public CompletableFuture<PortalInstance> createPortalAsync(
+            MinecraftClient client,
+            ClientPlayerEntity player,
+            String sceneName,
+            SceneSnapshot snapshot,
+            @Nullable String serverAddress
+    ) {
+        String normalizedServerAddress = normalizeServerAddress(serverAddress);
+        PortalPlacement placement = computePortalPlacement(player, sceneName, snapshot.skyColor(), normalizedServerAddress);
 
         CompletableFuture<List<PortalRenderBlock>> renderBlocksFuture =
                 CompletableFuture.supplyAsync(() -> prepareRenderBlocks(snapshot), portalPrepareExecutor);
@@ -80,6 +103,7 @@ public final class PortalManager {
         return renderBlocksFuture.thenCombine(lightSamplesFuture, (renderBlocks, lightSamples) ->
                 new PreparedPortalData(
                         placement.sceneName(),
+                        placement.serverAddress(),
                         placement.center(),
                         placement.normal(),
                         placement.right(),
@@ -91,7 +115,12 @@ public final class PortalManager {
                 )).thenCompose(prepared -> enqueuePortalCreation(client, prepared));
     }
 
-    private static PortalPlacement computePortalPlacement(ClientPlayerEntity player, String sceneName, Vec3d skyColor) {
+    private static PortalPlacement computePortalPlacement(
+            ClientPlayerEntity player,
+            String sceneName,
+            Vec3d skyColor,
+            @Nullable String serverAddress
+    ) {
         PlaneBasis basis = buildVerticalPlaneBasis(player.getYaw());
         Vec3d normal = basis.normal();
         Vec3d right = basis.right();
@@ -110,7 +139,7 @@ public final class PortalManager {
         Vec3d sceneAnchor = new Vec3d(anchorX, center.y - eyeOffsetY, anchorZ)
                 .add(normal.multiply(0.01D));
 
-        return new PortalPlacement(sceneName, center, normal, right, up, sceneAnchor, skyColor);
+        return new PortalPlacement(sceneName, serverAddress, center, normal, right, up, sceneAnchor, skyColor);
     }
 
     private CompletableFuture<PortalInstance> enqueuePortalCreation(MinecraftClient client, PreparedPortalData prepared) {
@@ -123,6 +152,7 @@ public final class PortalManager {
             PortalInstance portal = new PortalInstance(
                 UUID.randomUUID(),
                 prepared.sceneName(),
+                prepared.serverAddress(),
                 prepared.center(),
                 prepared.normal(),
                 prepared.right(),
@@ -142,6 +172,7 @@ public final class PortalManager {
 
     private record PreparedPortalData(
             String sceneName,
+            @Nullable String serverAddress,
             Vec3d center,
             Vec3d normal,
             Vec3d right,
@@ -155,6 +186,7 @@ public final class PortalManager {
 
     private record PortalPlacement(
             String sceneName,
+            @Nullable String serverAddress,
             Vec3d center,
             Vec3d normal,
             Vec3d right,
@@ -331,6 +363,15 @@ public final class PortalManager {
     }
 
     private record PlaneBasis(Vec3d normal, Vec3d right, Vec3d up) {
+    }
+
+    @Nullable
+    private static String normalizeServerAddress(@Nullable String serverAddress) {
+        if (serverAddress == null) {
+            return null;
+        }
+        String trimmed = serverAddress.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }
 

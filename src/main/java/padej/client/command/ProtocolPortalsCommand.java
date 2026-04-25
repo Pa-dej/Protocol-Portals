@@ -7,7 +7,9 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ServerAddress;
 import net.minecraft.text.Text;
+import org.jetbrains.annotations.Nullable;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalManager;
 import padej.client.screen.ProtocolPortalsScreen;
@@ -37,7 +39,9 @@ public final class ProtocolPortalsCommand {
                                                 .executes(this::createSnapshot)))
                                 .then(ClientCommandManager.literal("portal")
                                         .then(ClientCommandManager.argument("fileName", StringArgumentType.word())
-                                                .executes(this::createPortal)))
+                                                .executes(this::createPortal)
+                                                .then(ClientCommandManager.argument("serverAddress", StringArgumentType.word())
+                                                        .executes(this::createPortalWithServerAddress))))
                                 .then(ClientCommandManager.literal("debug-plane")
                                         .executes(this::createDebugPlane)))
                         .then(ClientCommandManager.literal("remove")
@@ -135,11 +139,23 @@ public final class ProtocolPortalsCommand {
     }
 
     private int createPortal(CommandContext<FabricClientCommandSource> context) {
+        return createPortal(context, null);
+    }
+
+    private int createPortalWithServerAddress(CommandContext<FabricClientCommandSource> context) {
+        return createPortal(context, StringArgumentType.getString(context, "serverAddress"));
+    }
+
+    private int createPortal(CommandContext<FabricClientCommandSource> context, @Nullable String targetServerAddress) {
         FabricClientCommandSource source = context.getSource();
         MinecraftClient client = source.getClient();
         String fileName = StringArgumentType.getString(context, "fileName");
         if (!sceneRepository.isValidFileName(fileName)) {
             source.sendError(SceneRepository.invalidNameText(fileName));
+            return 0;
+        }
+        String normalizedServerAddress = normalizeAndValidateServerAddress(targetServerAddress, source);
+        if (targetServerAddress != null && normalizedServerAddress == null) {
             return 0;
         }
 
@@ -155,12 +171,18 @@ public final class ProtocolPortalsCommand {
         }
 
         String normalizedSceneName = fileName.toLowerCase(Locale.ROOT);
-        source.sendFeedback(Text.literal("Preparing portal scene '" + fileName + "' on worker threads..."));
-        portalManager.createPortalAsync(client, client.player, normalizedSceneName, scene.get())
+        if (normalizedServerAddress == null) {
+            source.sendFeedback(Text.literal("Preparing portal scene '" + fileName + "' on worker threads..."));
+        } else {
+            source.sendFeedback(Text.literal("Preparing portal scene '" + fileName
+                    + "' for server '" + normalizedServerAddress + "'..."));
+        }
+        portalManager.createPortalAsync(client, client.player, normalizedSceneName, scene.get(), normalizedServerAddress)
                 .thenAccept(portal -> client.execute(() -> source.sendFeedback(Text.literal(
                         "Portal created for scene '" + fileName + "' at "
                                 + formatVec(portal.center().x, portal.center().y, portal.center().z)
                                 + ". Render blocks: " + portal.renderBlocks().size()
+                                + (portal.serverAddress() == null ? "" : ". Target server: " + portal.serverAddress())
                 ))))
                 .exceptionally(throwable -> {
                     Throwable cause = unwrapCompletionCause(throwable);
@@ -240,5 +262,21 @@ public final class ProtocolPortalsCommand {
             current = current.getCause();
         }
         return current;
+    }
+
+    @Nullable
+    private static String normalizeAndValidateServerAddress(@Nullable String serverAddress, FabricClientCommandSource source) {
+        if (serverAddress == null) {
+            return null;
+        }
+        String value = serverAddress.trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (!ServerAddress.isValid(value)) {
+            source.sendError(Text.literal("Invalid server address '" + value + "'. Use host or host:port."));
+            return null;
+        }
+        return value;
     }
 }

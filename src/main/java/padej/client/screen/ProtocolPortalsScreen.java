@@ -3,6 +3,7 @@ package padej.client.screen;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.network.ServerAddress;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.text.OrderedText;
@@ -24,6 +25,7 @@ public final class ProtocolPortalsScreen extends Screen {
     private final Screen parent;
 
     private TextFieldWidget sceneNameField;
+    private TextFieldWidget serverAddressField;
     private TextFieldWidget captureRadiusField;
     private ButtonWidget createSnapshotButton;
     private ButtonWidget createPortalButton;
@@ -42,6 +44,7 @@ public final class ProtocolPortalsScreen extends Screen {
     private int statusBoxY;
     private int statusBoxHeight;
     private int radiusLabelY;
+    private int serverLabelY;
     private boolean showHintLine;
 
     private String statusMessage = "Ready. Enter scene name and choose an action.";
@@ -108,6 +111,21 @@ public final class ProtocolPortalsScreen extends Screen {
         sceneNameField.setDrawsBackground(true);
         addDrawableChild(sceneNameField);
         y += fieldHeight + fieldGap;
+
+        serverLabelY = y - 8;
+        serverAddressField = new TextFieldWidget(
+                textRenderer,
+                contentLeft,
+                y,
+                contentWidth,
+                buttonHeight,
+                Text.literal("Server Address")
+        );
+        serverAddressField.setMaxLength(255);
+        serverAddressField.setPlaceholder(Text.literal("example.com:25565"));
+        serverAddressField.setDrawsBackground(true);
+        addDrawableChild(serverAddressField);
+        y += buttonHeight + sectionGap;
 
         int radiusFieldWidth = 72;
         int autoButtonWidth = 56;
@@ -218,6 +236,13 @@ public final class ProtocolPortalsScreen extends Screen {
         context.drawTextWithShadow(textRenderer, Text.literal("Scene Name"), panelLeft + 10, panelTop + 20, 0xAFAFAF);
         context.drawTextWithShadow(
                 textRenderer,
+                Text.literal("Server IP / Host (optional)"),
+                panelLeft + 10,
+                serverLabelY,
+                0xAFAFAF
+        );
+        context.drawTextWithShadow(
+                textRenderer,
                 Text.literal("Capture Radius (2-16, empty = auto)"),
                 panelLeft + 10,
                 radiusLabelY,
@@ -305,6 +330,10 @@ public final class ProtocolPortalsScreen extends Screen {
         if (fileName == null) {
             return;
         }
+        String serverAddress = readServerAddress();
+        if (serverAddress == null && serverAddressField != null && !serverAddressField.getText().trim().isEmpty()) {
+            return;
+        }
         if (client.player == null) {
             setError("You must be in world to create portal.");
             return;
@@ -317,11 +346,16 @@ public final class ProtocolPortalsScreen extends Screen {
         }
 
         String normalized = fileName.toLowerCase(Locale.ROOT);
-        setStatus("Preparing portal scene '" + fileName + "' on worker threads...");
-        portalManager.createPortalAsync(client, client.player, normalized, scene.get())
+        if (serverAddress == null) {
+            setStatus("Preparing portal scene '" + fileName + "' on worker threads...");
+        } else {
+            setStatus("Preparing portal scene '" + fileName + "' for server '" + serverAddress + "'...");
+        }
+        portalManager.createPortalAsync(client, client.player, normalized, scene.get(), serverAddress)
                 .thenAccept(portal -> client.execute(() -> setStatus("Portal created at "
                         + formatVec(portal.center().x, portal.center().y, portal.center().z)
-                        + ", render blocks: " + portal.renderBlocks().size())))
+                        + ", render blocks: " + portal.renderBlocks().size()
+                        + (portal.serverAddress() == null ? "" : ", target: " + portal.serverAddress()))))
                 .exceptionally(throwable -> {
                     Throwable cause = unwrapCompletionCause(throwable);
                     String message = cause.getMessage() == null ? cause.toString() : cause.getMessage();
@@ -382,6 +416,18 @@ public final class ProtocolPortalsScreen extends Screen {
         }
         if (!sceneRepository.isValidFileName(value)) {
             setError(SceneRepository.invalidNameText(value).getString());
+            return null;
+        }
+        return value;
+    }
+
+    private String readServerAddress() {
+        String value = serverAddressField == null ? "" : serverAddressField.getText().trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+        if (!ServerAddress.isValid(value)) {
+            setError("Invalid server address '" + value + "'. Use host or host:port.");
             return null;
         }
         return value;
@@ -454,6 +500,9 @@ public final class ProtocolPortalsScreen extends Screen {
         if (captureRadiusField != null) {
             captureRadiusField.render(context, mouseX, mouseY, delta);
         }
+        if (serverAddressField != null) {
+            serverAddressField.render(context, mouseX, mouseY, delta);
+        }
         if (autoRadiusButton != null) {
             autoRadiusButton.render(context, mouseX, mouseY, delta);
         }
@@ -491,6 +540,7 @@ public final class ProtocolPortalsScreen extends Screen {
         int hintHeight = showHintLine ? 12 : 0;
         int contentHeight =
                 fieldHeight + fieldGap
+                        + buttonHeight + sectionGap
                         + buttonHeight + sectionGap
                         + buttonHeight + rowGap
                         + buttonHeight + rowGap

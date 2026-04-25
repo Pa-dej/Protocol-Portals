@@ -9,6 +9,7 @@ import net.minecraft.client.util.InputUtil;
 import org.lwjgl.glfw.GLFW;
 import padej.client.command.ProtocolPortalsCommand;
 import padej.client.portal.PortalManager;
+import padej.client.portal.PortalServerTransferController;
 import padej.client.render.PortalSceneRenderer;
 import padej.client.render.ProtocolPortalsShaders;
 import padej.client.render.SnapshotCaptureHudRenderer;
@@ -18,6 +19,7 @@ import padej.client.scene.SceneRepository;
 public class MainClient implements ClientModInitializer {
     private final SceneRepository sceneRepository = new SceneRepository();
     private final PortalManager portalManager = new PortalManager();
+    private final PortalServerTransferController portalServerTransferController = new PortalServerTransferController(portalManager);
     private KeyBinding openMenuKeyBinding;
 
     @Override
@@ -34,6 +36,7 @@ public class MainClient implements ClientModInitializer {
         ));
         ClientTickEvents.END_CLIENT_TICK.register(sceneRepository::tick);
         ClientTickEvents.END_CLIENT_TICK.register(this::handleMenuHotkey);
+        ClientTickEvents.END_CLIENT_TICK.register(portalServerTransferController::tick);
     }
 
     private void handleMenuHotkey(MinecraftClient client) {
