@@ -12,6 +12,7 @@ import net.minecraft.client.network.ServerAddress;
 import net.minecraft.text.Text;
 import org.jetbrains.annotations.Nullable;
 import padej.client.portal.PortalInstance;
+import padej.client.portal.PortalEditController;
 import padej.client.portal.PortalManager;
 import padej.client.screen.ProtocolPortalsScreen;
 import padej.client.render.PortalSceneRenderer;
@@ -26,10 +27,16 @@ import java.util.concurrent.CompletionException;
 public final class ProtocolPortalsCommand {
     private final SceneRepository sceneRepository;
     private final PortalManager portalManager;
+    private final PortalEditController portalEditController;
 
-    public ProtocolPortalsCommand(SceneRepository sceneRepository, PortalManager portalManager) {
+    public ProtocolPortalsCommand(
+            SceneRepository sceneRepository,
+            PortalManager portalManager,
+            PortalEditController portalEditController
+    ) {
         this.sceneRepository = sceneRepository;
         this.portalManager = portalManager;
+        this.portalEditController = portalEditController;
     }
 
     public void register() {
@@ -53,6 +60,11 @@ public final class ProtocolPortalsCommand {
                                 .then(ClientCommandManager.literal("portal-scissors")
                                         .then(ClientCommandManager.argument("enabled", BoolArgumentType.bool())
                                                 .executes(this::setPortalScissors))))
+                        .then(ClientCommandManager.literal("edit")
+                                .then(ClientCommandManager.literal("stop")
+                                        .executes(this::stopPortalEdit))
+                                .then(ClientCommandManager.argument("fileName", StringArgumentType.word())
+                                        .executes(this::editPortal)))
                         .then(ClientCommandManager.literal("remove")
                                 .then(ClientCommandManager.literal("portal")
                                         .executes(this::removeNearestPortal)
@@ -241,6 +253,51 @@ public final class ProtocolPortalsCommand {
         context.getSource().sendFeedback(Text.literal(
                 "Portal scissors (scene clipping by portal plane) " + (enabled ? "enabled" : "disabled") + "."
         ));
+        return 1;
+    }
+
+    private int editPortal(CommandContext<FabricClientCommandSource> context) {
+        FabricClientCommandSource source = context.getSource();
+        String fileName = StringArgumentType.getString(context, "fileName");
+        if (!sceneRepository.isValidFileName(fileName)) {
+            source.sendError(SceneRepository.invalidNameText(fileName));
+            return 0;
+        }
+
+        MinecraftClient client = source.getClient();
+        if (client.player == null || client.world == null) {
+            source.sendError(Text.literal("You must be in world to edit portal."));
+            return 0;
+        }
+
+        String sceneName = fileName.toLowerCase(Locale.ROOT);
+        if (portalEditController.isEditingScene(sceneName)) {
+            portalEditController.stopEditing();
+            source.sendFeedback(Text.literal("Portal edit mode disabled for scene '" + sceneName + "'."));
+            return 1;
+        }
+
+        boolean started = portalEditController.startEditing(sceneName, client.player.getPos());
+        if (!started) {
+            source.sendError(Text.literal("No portal found for scene '" + sceneName + "'."));
+            return 0;
+        }
+
+        source.sendFeedback(Text.literal(
+                "Portal edit mode enabled for '" + sceneName + "'. "
+                        + "Controls: hold Sneak + LMB on gizmo handles. Center handle moves portal on block grid; "
+                        + "red handles change width; green handles change height. Use /pp edit stop to finish."
+        ));
+        return 1;
+    }
+
+    private int stopPortalEdit(CommandContext<FabricClientCommandSource> context) {
+        if (!portalEditController.stopEditing()) {
+            context.getSource().sendError(Text.literal("Portal edit mode is not active."));
+            return 0;
+        }
+
+        context.getSource().sendFeedback(Text.literal("Portal edit mode disabled."));
         return 1;
     }
 

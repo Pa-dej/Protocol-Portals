@@ -43,6 +43,7 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15C;
 import org.lwjgl.opengl.GL33C;
 import padej.client.portal.DebugPlaneInstance;
+import padej.client.portal.PortalEditController;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalManager;
 import padej.client.portal.PortalRenderBlock;
@@ -81,6 +82,7 @@ public final class PortalSceneRenderer {
     private static boolean irisWorldRendererPipelineFieldResolved = false;
 
     private final PortalManager portalManager;
+    private final PortalEditController portalEditController;
     private final Map<SceneCacheKey, CachedScene> cachedScenes = new HashMap<>();
     private final ExecutorService scenePrepareExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors() / 2),
@@ -109,8 +111,9 @@ public final class PortalSceneRenderer {
     private int irisPortalFramebufferHeight = -1;
     private long renderFrameIndex = 0L;
 
-    public PortalSceneRenderer(PortalManager portalManager) {
+    public PortalSceneRenderer(PortalManager portalManager, PortalEditController portalEditController) {
         this.portalManager = portalManager;
+        this.portalEditController = portalEditController;
     }
 
     public static void setPortalScissorsEnabled(boolean enabled) {
@@ -265,6 +268,7 @@ public final class PortalSceneRenderer {
             RenderSystem.depthFunc(GL11.GL_LEQUAL);
 
             drawPortalFrames(portals, matrix);
+            renderPortalEditGizmo(matrix);
             RenderSystem.enableCull();
         } finally {
             matrices.pop();
@@ -474,6 +478,56 @@ public final class PortalSceneRenderer {
         }
     }
 
+    private void renderPortalEditGizmo(Matrix4f matrix) {
+        PortalInstance portal = portalEditController.editingPortal();
+        if (portal == null) {
+            return;
+        }
+
+        Vec3d center = portal.center();
+        Vec3d right = portal.right();
+        Vec3d up = portal.up();
+        Vec3d widthHandle = center.add(right.multiply(portal.width() * 0.5D + 0.65D));
+        Vec3d widthHandleMirror = center.subtract(right.multiply(portal.width() * 0.5D + 0.65D));
+        Vec3d heightHandle = center.add(up.multiply(portal.height() * 0.5D + 0.65D));
+        Vec3d heightHandleMirror = center.subtract(up.multiply(portal.height() * 0.5D + 0.65D));
+
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(false);
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        usePortalAreaShader();
+
+        BufferBuilder gizmoLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
+        addPlaneFrame(gizmoLines, matrix, center, right, up, portal.width(), portal.height(), 255, 230, 80, 255);
+        addLine(gizmoLines, matrix, center, widthHandle, 255, 96, 96, 255);
+        addLine(gizmoLines, matrix, center, widthHandleMirror, 255, 96, 96, 255);
+        addLine(gizmoLines, matrix, center, heightHandle, 96, 255, 128, 255);
+        addLine(gizmoLines, matrix, center, heightHandleMirror, 96, 255, 128, 255);
+        addHandleCross(gizmoLines, matrix, center, right, up, 0.16D, 255, 255, 255, 255);
+        addHandleCross(gizmoLines, matrix, widthHandle, right, up, 0.20D, 255, 96, 96, 255);
+        addHandleCross(gizmoLines, matrix, widthHandleMirror, right, up, 0.20D, 255, 96, 96, 255);
+        addHandleCross(gizmoLines, matrix, heightHandle, right, up, 0.20D, 96, 255, 128, 255);
+        addHandleCross(gizmoLines, matrix, heightHandleMirror, right, up, 0.20D, 96, 255, 128, 255);
+        BufferRenderer.drawWithGlobalProgram(gizmoLines.end());
+
+        RenderSystem.disableDepthTest();
+        BufferBuilder xrayLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
+        addPlaneFrame(xrayLines, matrix, center, right, up, portal.width(), portal.height(), 255, 255, 180, 170);
+        addLine(xrayLines, matrix, center, widthHandle, 255, 120, 120, 170);
+        addLine(xrayLines, matrix, center, widthHandleMirror, 255, 120, 120, 170);
+        addLine(xrayLines, matrix, center, heightHandle, 120, 255, 150, 170);
+        addLine(xrayLines, matrix, center, heightHandleMirror, 120, 255, 150, 170);
+        BufferRenderer.drawWithGlobalProgram(xrayLines.end());
+
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(true);
+        RenderSystem.enableCull();
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+    }
+
     private void renderDebugPlanes(List<DebugPlaneInstance> debugPlanes, Matrix4f matrix) {
         if (debugPlanes.isEmpty()) {
             return;
@@ -619,6 +673,7 @@ public final class PortalSceneRenderer {
 
         mainFramebuffer.beginWrite(true);
         drawPortalFrames(portals, viewMatrix);
+        renderPortalEditGizmo(viewMatrix);
         RenderSystem.enableCull();
     }
 
@@ -1204,6 +1259,24 @@ public final class PortalSceneRenderer {
     ) {
         lines.vertex(matrix, (float) a.x, (float) a.y, (float) a.z).color(red, green, blue, alpha);
         lines.vertex(matrix, (float) b.x, (float) b.y, (float) b.z).color(red, green, blue, alpha);
+    }
+
+    private static void addHandleCross(
+            BufferBuilder lines,
+            Matrix4f matrix,
+            Vec3d center,
+            Vec3d axisA,
+            Vec3d axisB,
+            double radius,
+            int red,
+            int green,
+            int blue,
+            int alpha
+    ) {
+        Vec3d a = axisA.normalize().multiply(radius);
+        Vec3d b = axisB.normalize().multiply(radius);
+        addLine(lines, matrix, center.subtract(a), center.add(a), red, green, blue, alpha);
+        addLine(lines, matrix, center.subtract(b), center.add(b), red, green, blue, alpha);
     }
 
     private static void addVertex(

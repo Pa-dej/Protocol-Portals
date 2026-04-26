@@ -39,8 +39,105 @@ public final class PortalManager {
         return List.copyOf(activePortals);
     }
 
+    public void clearPortals() {
+        activePortals.clear();
+    }
+
     public List<DebugPlaneInstance> debugPlanes() {
         return List.copyOf(debugPlanes);
+    }
+
+    public Optional<PortalInstance> findPortalById(UUID portalId) {
+        for (PortalInstance portal : activePortals) {
+            if (portal.id().equals(portalId)) {
+                return Optional.of(portal);
+            }
+        }
+        return Optional.empty();
+    }
+
+    public Optional<PortalInstance> findNearestPortalBySceneName(String sceneName, Vec3d position) {
+        int index = findNearestPortalIndex(position, sceneName);
+        if (index < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(activePortals.get(index));
+    }
+
+    public Optional<PortalInstance> updatePortalGeometry(
+            UUID portalId,
+            Vec3d center,
+            Vec3d sceneAnchor,
+            double width,
+            double height
+    ) {
+        for (int i = 0; i < activePortals.size(); i++) {
+            PortalInstance current = activePortals.get(i);
+            if (!current.id().equals(portalId)) {
+                continue;
+            }
+
+            double clampedWidth = Math.max(1.0D, width);
+            double clampedHeight = Math.max(1.0D, height);
+            PortalInstance updated = new PortalInstance(
+                    current.id(),
+                    current.sceneName(),
+                    current.serverAddress(),
+                    center,
+                    current.normal(),
+                    current.right(),
+                    current.up(),
+                    sceneAnchor,
+                    current.skyColor(),
+                    clampedWidth,
+                    clampedHeight,
+                    current.renderBlocks(),
+                    current.lightSamples()
+            );
+            activePortals.set(i, updated);
+            return Optional.of(updated);
+        }
+        return Optional.empty();
+    }
+
+    public PortalInstance restorePortalFromSnapshot(
+            String sceneName,
+            @Nullable String serverAddress,
+            SceneSnapshot snapshot,
+            Vec3d center,
+            Vec3d normal,
+            Vec3d right,
+            Vec3d up,
+            Vec3d sceneAnchor,
+            Vec3d skyColor,
+            double width,
+            double height
+    ) {
+        Vec3d normalizedNormal = normalizeOrFallback(normal, new Vec3d(0.0D, 0.0D, 1.0D));
+        Vec3d normalizedRight = normalizeOrFallback(right, new Vec3d(1.0D, 0.0D, 0.0D));
+        Vec3d normalizedUp = normalizeOrFallback(up, new Vec3d(0.0D, 1.0D, 0.0D));
+        double restoredWidth = Math.max(1.0D, width);
+        double restoredHeight = Math.max(1.0D, height);
+
+        List<PortalRenderBlock> renderBlocks = prepareRenderBlocks(snapshot);
+        List<PortalLightSample> lightSamples = prepareLightSamples(snapshot);
+        PortalInstance portal = new PortalInstance(
+                UUID.randomUUID(),
+                sceneName,
+                normalizeServerAddress(serverAddress),
+                center,
+                normalizedNormal,
+                normalizedRight,
+                normalizedUp,
+                sceneAnchor,
+                skyColor,
+                restoredWidth,
+                restoredHeight,
+                renderBlocks,
+                lightSamples
+        );
+        activePortals.add(portal);
+        return portal;
     }
 
     public PortalInstance createPortal(ClientPlayerEntity player, String sceneName, SceneSnapshot snapshot) {
@@ -425,6 +522,10 @@ public final class PortalManager {
         return new Vec3d(x, y, z);
     }
 
+    public static Vec3d snapPortalCenterToBlockGrid(Vec3d desiredCenter, Vec3d normal) {
+        return alignPortalCenterToBlockGrid(desiredCenter, normal);
+    }
+
     private int findNearestPortalIndex(Vec3d position, String requiredSceneName) {
         int bestIndex = -1;
         double bestDistanceSq = Double.POSITIVE_INFINITY;
@@ -529,6 +630,16 @@ public final class PortalManager {
         }
         String trimmed = serverAddress.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static Vec3d normalizeOrFallback(Vec3d value, Vec3d fallback) {
+        if (!Double.isFinite(value.x) || !Double.isFinite(value.y) || !Double.isFinite(value.z)) {
+            return fallback;
+        }
+        if (value.lengthSquared() < 1.0E-8D) {
+            return fallback;
+        }
+        return value.normalize();
     }
 }
 

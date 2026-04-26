@@ -8,7 +8,9 @@ import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import org.lwjgl.glfw.GLFW;
 import padej.client.command.ProtocolPortalsCommand;
+import padej.client.portal.PortalEditController;
 import padej.client.portal.PortalManager;
+import padej.client.portal.PortalPersistenceService;
 import padej.client.portal.PortalServerTransferController;
 import padej.client.render.PortalSceneRenderer;
 import padej.client.render.ProtocolPortalsShaders;
@@ -19,14 +21,16 @@ import padej.client.scene.SceneRepository;
 public class MainClient implements ClientModInitializer {
     private final SceneRepository sceneRepository = new SceneRepository();
     private final PortalManager portalManager = new PortalManager();
+    private final PortalEditController portalEditController = new PortalEditController(portalManager);
+    private final PortalPersistenceService portalPersistenceService = new PortalPersistenceService(sceneRepository, portalManager);
     private final PortalServerTransferController portalServerTransferController = new PortalServerTransferController(portalManager);
     private KeyBinding openMenuKeyBinding;
 
     @Override
     public void onInitializeClient() {
         ProtocolPortalsShaders.register();
-        new ProtocolPortalsCommand(sceneRepository, portalManager).register();
-        new PortalSceneRenderer(portalManager).register();
+        new ProtocolPortalsCommand(sceneRepository, portalManager, portalEditController).register();
+        new PortalSceneRenderer(portalManager, portalEditController).register();
         new SnapshotCaptureHudRenderer(sceneRepository).register();
         openMenuKeyBinding = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.protocol_portals.open_menu",
@@ -35,6 +39,8 @@ public class MainClient implements ClientModInitializer {
                 "category.protocol_portals"
         ));
         ClientTickEvents.END_CLIENT_TICK.register(sceneRepository::tick);
+        ClientTickEvents.END_CLIENT_TICK.register(portalPersistenceService::tick);
+        ClientTickEvents.END_CLIENT_TICK.register(portalEditController::tick);
         ClientTickEvents.END_CLIENT_TICK.register(this::handleMenuHotkey);
         ClientTickEvents.END_CLIENT_TICK.register(portalServerTransferController::tick);
     }
