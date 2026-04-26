@@ -40,7 +40,7 @@ public class MainClient implements ClientModInitializer {
         ));
         ClientTickEvents.END_CLIENT_TICK.register(sceneRepository::tick);
         ClientTickEvents.END_CLIENT_TICK.register(portalPersistenceService::tick);
-        ClientTickEvents.END_CLIENT_TICK.register(portalEditController::tick);
+        ClientTickEvents.START_CLIENT_TICK.register(portalEditController::tick);
         ClientTickEvents.END_CLIENT_TICK.register(this::handleMenuHotkey);
         ClientTickEvents.END_CLIENT_TICK.register(portalServerTransferController::tick);
     }

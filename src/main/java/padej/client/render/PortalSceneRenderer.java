@@ -493,11 +493,56 @@ public final class PortalSceneRenderer {
         double viewerSide = cameraPos.subtract(center).dotProduct(normal);
         Vec3d overlayOffset = normal.multiply((viewerSide >= 0.0D ? 1.0D : -1.0D) * 0.04D);
 
-        Vec3d moveHandle = gizmo.moveHandle().add(overlayOffset);
-        Vec3d widthHandle = gizmo.widthHandlePositive().add(overlayOffset);
-        Vec3d widthHandleMirror = gizmo.widthHandleNegative().add(overlayOffset);
-        Vec3d heightHandle = gizmo.heightHandlePositive().add(overlayOffset);
-        Vec3d heightHandleMirror = gizmo.heightHandleNegative().add(overlayOffset);
+        PortalEditController.HandleKind hoveredHandle = portalEditController.hoveredHandle();
+        GizmoHandleVisual moveHandle = createHandleVisual(
+                gizmo.moveHandle().add(overlayOffset),
+                gizmo.moveHalfSize(),
+                PortalEditController.HandleKind.MOVE,
+                hoveredHandle,
+                255, 255, 255
+        );
+        GizmoHandleVisual widthHandle = createHandleVisual(
+                gizmo.widthHandlePositive().add(overlayOffset),
+                gizmo.resizeHalfSize(),
+                PortalEditController.HandleKind.WIDTH_POSITIVE,
+                hoveredHandle,
+                255, 96, 96
+        );
+        GizmoHandleVisual widthHandleMirror = createHandleVisual(
+                gizmo.widthHandleNegative().add(overlayOffset),
+                gizmo.resizeHalfSize(),
+                PortalEditController.HandleKind.WIDTH_NEGATIVE,
+                hoveredHandle,
+                255, 96, 96
+        );
+        GizmoHandleVisual heightHandle = createHandleVisual(
+                gizmo.heightHandlePositive().add(overlayOffset),
+                gizmo.resizeHalfSize(),
+                PortalEditController.HandleKind.HEIGHT_POSITIVE,
+                hoveredHandle,
+                96, 255, 128
+        );
+        GizmoHandleVisual heightHandleMirror = createHandleVisual(
+                gizmo.heightHandleNegative().add(overlayOffset),
+                gizmo.resizeHalfSize(),
+                PortalEditController.HandleKind.HEIGHT_NEGATIVE,
+                hoveredHandle,
+                96, 255, 128
+        );
+        GizmoHandleVisual depthHandle = createHandleVisual(
+                gizmo.depthHandlePositive().add(overlayOffset),
+                gizmo.resizeHalfSize(),
+                PortalEditController.HandleKind.DEPTH_POSITIVE,
+                hoveredHandle,
+                96, 150, 255
+        );
+        GizmoHandleVisual depthHandleMirror = createHandleVisual(
+                gizmo.depthHandleNegative().add(overlayOffset),
+                gizmo.resizeHalfSize(),
+                PortalEditController.HandleKind.DEPTH_NEGATIVE,
+                hoveredHandle,
+                96, 150, 255
+        );
 
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
@@ -506,54 +551,125 @@ public final class PortalSceneRenderer {
         RenderSystem.depthMask(false);
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         usePortalAreaShader();
+        double axisRightHalfLength = portal.width() * 0.5D + 1.10D;
+        double axisUpHalfLength = portal.height() * 0.5D + 1.10D;
+        double axisDepthHalfLength = 1.75D;
+        double axisArrowSize = 0.24D;
 
         BufferBuilder gizmoFills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        addAxisAlignedCube(gizmoFills, matrix, moveHandle, gizmo.moveHalfSize(), 255, 255, 255, 220);
-        addAxisAlignedCube(gizmoFills, matrix, widthHandle, gizmo.resizeHalfSize(), 255, 96, 96, 230);
-        addAxisAlignedCube(gizmoFills, matrix, widthHandleMirror, gizmo.resizeHalfSize(), 255, 96, 96, 230);
-        addAxisAlignedCube(gizmoFills, matrix, heightHandle, gizmo.resizeHalfSize(), 96, 255, 128, 230);
-        addAxisAlignedCube(gizmoFills, matrix, heightHandleMirror, gizmo.resizeHalfSize(), 96, 255, 128, 230);
+        addAxisAlignedCube(gizmoFills, matrix, moveHandle.position(), moveHandle.halfSize(), moveHandle.red(), moveHandle.green(), moveHandle.blue(), moveHandle.hovered() ? 255 : 220);
+        addAxisAlignedCube(gizmoFills, matrix, widthHandle.position(), widthHandle.halfSize(), widthHandle.red(), widthHandle.green(), widthHandle.blue(), widthHandle.hovered() ? 255 : 230);
+        addAxisAlignedCube(gizmoFills, matrix, widthHandleMirror.position(), widthHandleMirror.halfSize(), widthHandleMirror.red(), widthHandleMirror.green(), widthHandleMirror.blue(), widthHandleMirror.hovered() ? 255 : 230);
+        addAxisAlignedCube(gizmoFills, matrix, heightHandle.position(), heightHandle.halfSize(), heightHandle.red(), heightHandle.green(), heightHandle.blue(), heightHandle.hovered() ? 255 : 230);
+        addAxisAlignedCube(gizmoFills, matrix, heightHandleMirror.position(), heightHandleMirror.halfSize(), heightHandleMirror.red(), heightHandleMirror.green(), heightHandleMirror.blue(), heightHandleMirror.hovered() ? 255 : 230);
+        addAxisAlignedCube(gizmoFills, matrix, depthHandle.position(), depthHandle.halfSize(), depthHandle.red(), depthHandle.green(), depthHandle.blue(), depthHandle.hovered() ? 255 : 230);
+        addAxisAlignedCube(gizmoFills, matrix, depthHandleMirror.position(), depthHandleMirror.halfSize(), depthHandleMirror.red(), depthHandleMirror.green(), depthHandleMirror.blue(), depthHandleMirror.hovered() ? 255 : 230);
         BufferRenderer.drawWithGlobalProgram(gizmoFills.end());
 
         BufferBuilder gizmoLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
-        addPlaneFrame(gizmoLines, matrix, moveHandle, right, up, portal.width(), portal.height(), 255, 230, 80, 255);
-        addLine(gizmoLines, matrix, moveHandle, widthHandle, 255, 96, 96, 255);
-        addLine(gizmoLines, matrix, moveHandle, widthHandleMirror, 255, 96, 96, 255);
-        addLine(gizmoLines, matrix, moveHandle, heightHandle, 96, 255, 128, 255);
-        addLine(gizmoLines, matrix, moveHandle, heightHandleMirror, 96, 255, 128, 255);
-        addAxisAlignedCubeWire(gizmoLines, matrix, moveHandle, gizmo.moveHalfSize(), 255, 255, 255, 255);
-        addAxisAlignedCubeWire(gizmoLines, matrix, widthHandle, gizmo.resizeHalfSize(), 255, 96, 96, 255);
-        addAxisAlignedCubeWire(gizmoLines, matrix, widthHandleMirror, gizmo.resizeHalfSize(), 255, 96, 96, 255);
-        addAxisAlignedCubeWire(gizmoLines, matrix, heightHandle, gizmo.resizeHalfSize(), 96, 255, 128, 255);
-        addAxisAlignedCubeWire(gizmoLines, matrix, heightHandleMirror, gizmo.resizeHalfSize(), 96, 255, 128, 255);
+        addAxisGuide(gizmoLines, matrix, moveHandle.position(), right, axisRightHalfLength, axisArrowSize, 255, 96, 96, 210);
+        addAxisGuide(gizmoLines, matrix, moveHandle.position(), up, axisUpHalfLength, axisArrowSize, 96, 255, 128, 210);
+        addAxisGuide(gizmoLines, matrix, moveHandle.position(), normal, axisDepthHalfLength, axisArrowSize, 96, 150, 255, 220);
+        addMovementAxisPreview(
+                gizmoLines,
+                matrix,
+                moveHandle.position(),
+                right,
+                up,
+                normal,
+                hoveredHandle,
+                axisRightHalfLength + 0.35D,
+                axisUpHalfLength + 0.35D,
+                axisDepthHalfLength + 0.35D,
+                axisArrowSize + 0.05D,
+                255
+        );
+        addPlaneFrame(gizmoLines, matrix, moveHandle.position(), right, up, portal.width(), portal.height(), 255, 230, 80, moveHandle.hovered() ? 255 : 220);
+        addLine(gizmoLines, matrix, moveHandle.position(), widthHandle.position(), widthHandle.red(), widthHandle.green(), widthHandle.blue(), widthHandle.hovered() ? 255 : 215);
+        addLine(gizmoLines, matrix, moveHandle.position(), widthHandleMirror.position(), widthHandleMirror.red(), widthHandleMirror.green(), widthHandleMirror.blue(), widthHandleMirror.hovered() ? 255 : 215);
+        addLine(gizmoLines, matrix, moveHandle.position(), heightHandle.position(), heightHandle.red(), heightHandle.green(), heightHandle.blue(), heightHandle.hovered() ? 255 : 215);
+        addLine(gizmoLines, matrix, moveHandle.position(), heightHandleMirror.position(), heightHandleMirror.red(), heightHandleMirror.green(), heightHandleMirror.blue(), heightHandleMirror.hovered() ? 255 : 215);
+        addLine(gizmoLines, matrix, moveHandle.position(), depthHandle.position(), depthHandle.red(), depthHandle.green(), depthHandle.blue(), depthHandle.hovered() ? 255 : 215);
+        addLine(gizmoLines, matrix, moveHandle.position(), depthHandleMirror.position(), depthHandleMirror.red(), depthHandleMirror.green(), depthHandleMirror.blue(), depthHandleMirror.hovered() ? 255 : 215);
+        addAxisAlignedCubeWire(gizmoLines, matrix, moveHandle.position(), moveHandle.halfSize(), moveHandle.red(), moveHandle.green(), moveHandle.blue(), 255);
+        addAxisAlignedCubeWire(gizmoLines, matrix, widthHandle.position(), widthHandle.halfSize(), widthHandle.red(), widthHandle.green(), widthHandle.blue(), widthHandle.hovered() ? 255 : 230);
+        addAxisAlignedCubeWire(gizmoLines, matrix, widthHandleMirror.position(), widthHandleMirror.halfSize(), widthHandleMirror.red(), widthHandleMirror.green(), widthHandleMirror.blue(), widthHandleMirror.hovered() ? 255 : 230);
+        addAxisAlignedCubeWire(gizmoLines, matrix, heightHandle.position(), heightHandle.halfSize(), heightHandle.red(), heightHandle.green(), heightHandle.blue(), heightHandle.hovered() ? 255 : 230);
+        addAxisAlignedCubeWire(gizmoLines, matrix, heightHandleMirror.position(), heightHandleMirror.halfSize(), heightHandleMirror.red(), heightHandleMirror.green(), heightHandleMirror.blue(), heightHandleMirror.hovered() ? 255 : 230);
+        addAxisAlignedCubeWire(gizmoLines, matrix, depthHandle.position(), depthHandle.halfSize(), depthHandle.red(), depthHandle.green(), depthHandle.blue(), depthHandle.hovered() ? 255 : 230);
+        addAxisAlignedCubeWire(gizmoLines, matrix, depthHandleMirror.position(), depthHandleMirror.halfSize(), depthHandleMirror.red(), depthHandleMirror.green(), depthHandleMirror.blue(), depthHandleMirror.hovered() ? 255 : 230);
         BufferRenderer.drawWithGlobalProgram(gizmoLines.end());
 
         RenderSystem.disableDepthTest();
         BufferBuilder xrayFills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        addAxisAlignedCube(xrayFills, matrix, moveHandle, gizmo.moveHalfSize() + 0.04D, 255, 255, 255, 120);
-        addAxisAlignedCube(xrayFills, matrix, widthHandle, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 150);
-        addAxisAlignedCube(xrayFills, matrix, widthHandleMirror, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 150);
-        addAxisAlignedCube(xrayFills, matrix, heightHandle, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 150);
-        addAxisAlignedCube(xrayFills, matrix, heightHandleMirror, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 150);
+        addAxisAlignedCube(xrayFills, matrix, moveHandle.position(), moveHandle.halfSize() + (moveHandle.hovered() ? 0.018D : 0.010D), moveHandle.red(), moveHandle.green(), moveHandle.blue(), moveHandle.hovered() ? 185 : 110);
+        addAxisAlignedCube(xrayFills, matrix, widthHandle.position(), widthHandle.halfSize() + (widthHandle.hovered() ? 0.018D : 0.010D), widthHandle.red(), widthHandle.green(), widthHandle.blue(), widthHandle.hovered() ? 195 : 135);
+        addAxisAlignedCube(xrayFills, matrix, widthHandleMirror.position(), widthHandleMirror.halfSize() + (widthHandleMirror.hovered() ? 0.018D : 0.010D), widthHandleMirror.red(), widthHandleMirror.green(), widthHandleMirror.blue(), widthHandleMirror.hovered() ? 195 : 135);
+        addAxisAlignedCube(xrayFills, matrix, heightHandle.position(), heightHandle.halfSize() + (heightHandle.hovered() ? 0.018D : 0.010D), heightHandle.red(), heightHandle.green(), heightHandle.blue(), heightHandle.hovered() ? 195 : 135);
+        addAxisAlignedCube(xrayFills, matrix, heightHandleMirror.position(), heightHandleMirror.halfSize() + (heightHandleMirror.hovered() ? 0.018D : 0.010D), heightHandleMirror.red(), heightHandleMirror.green(), heightHandleMirror.blue(), heightHandleMirror.hovered() ? 195 : 135);
+        addAxisAlignedCube(xrayFills, matrix, depthHandle.position(), depthHandle.halfSize() + (depthHandle.hovered() ? 0.018D : 0.010D), depthHandle.red(), depthHandle.green(), depthHandle.blue(), depthHandle.hovered() ? 195 : 135);
+        addAxisAlignedCube(xrayFills, matrix, depthHandleMirror.position(), depthHandleMirror.halfSize() + (depthHandleMirror.hovered() ? 0.018D : 0.010D), depthHandleMirror.red(), depthHandleMirror.green(), depthHandleMirror.blue(), depthHandleMirror.hovered() ? 195 : 135);
         BufferRenderer.drawWithGlobalProgram(xrayFills.end());
 
         BufferBuilder xrayLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
-        addPlaneFrame(xrayLines, matrix, moveHandle, right, up, portal.width(), portal.height(), 255, 255, 180, 170);
-        addLine(xrayLines, matrix, moveHandle, widthHandle, 255, 120, 120, 170);
-        addLine(xrayLines, matrix, moveHandle, widthHandleMirror, 255, 120, 120, 170);
-        addLine(xrayLines, matrix, moveHandle, heightHandle, 120, 255, 150, 170);
-        addLine(xrayLines, matrix, moveHandle, heightHandleMirror, 120, 255, 150, 170);
-        addAxisAlignedCubeWire(xrayLines, matrix, moveHandle, gizmo.moveHalfSize() + 0.04D, 255, 255, 255, 170);
-        addAxisAlignedCubeWire(xrayLines, matrix, widthHandle, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 170);
-        addAxisAlignedCubeWire(xrayLines, matrix, widthHandleMirror, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 170);
-        addAxisAlignedCubeWire(xrayLines, matrix, heightHandle, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 170);
-        addAxisAlignedCubeWire(xrayLines, matrix, heightHandleMirror, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 170);
+        addAxisGuide(xrayLines, matrix, moveHandle.position(), right, axisRightHalfLength, axisArrowSize, 255, 120, 120, 120);
+        addAxisGuide(xrayLines, matrix, moveHandle.position(), up, axisUpHalfLength, axisArrowSize, 120, 255, 150, 120);
+        addAxisGuide(xrayLines, matrix, moveHandle.position(), normal, axisDepthHalfLength, axisArrowSize, 120, 170, 255, 130);
+        addMovementAxisPreview(
+                xrayLines,
+                matrix,
+                moveHandle.position(),
+                right,
+                up,
+                normal,
+                hoveredHandle,
+                axisRightHalfLength + 0.35D,
+                axisUpHalfLength + 0.35D,
+                axisDepthHalfLength + 0.35D,
+                axisArrowSize + 0.05D,
+                165
+        );
+        addPlaneFrame(xrayLines, matrix, moveHandle.position(), right, up, portal.width(), portal.height(), 255, 255, 180, moveHandle.hovered() ? 220 : 140);
+        addLine(xrayLines, matrix, moveHandle.position(), widthHandle.position(), widthHandle.red(), widthHandle.green(), widthHandle.blue(), widthHandle.hovered() ? 220 : 140);
+        addLine(xrayLines, matrix, moveHandle.position(), widthHandleMirror.position(), widthHandleMirror.red(), widthHandleMirror.green(), widthHandleMirror.blue(), widthHandleMirror.hovered() ? 220 : 140);
+        addLine(xrayLines, matrix, moveHandle.position(), heightHandle.position(), heightHandle.red(), heightHandle.green(), heightHandle.blue(), heightHandle.hovered() ? 220 : 140);
+        addLine(xrayLines, matrix, moveHandle.position(), heightHandleMirror.position(), heightHandleMirror.red(), heightHandleMirror.green(), heightHandleMirror.blue(), heightHandleMirror.hovered() ? 220 : 140);
+        addLine(xrayLines, matrix, moveHandle.position(), depthHandle.position(), depthHandle.red(), depthHandle.green(), depthHandle.blue(), depthHandle.hovered() ? 220 : 140);
+        addLine(xrayLines, matrix, moveHandle.position(), depthHandleMirror.position(), depthHandleMirror.red(), depthHandleMirror.green(), depthHandleMirror.blue(), depthHandleMirror.hovered() ? 220 : 140);
+        addAxisAlignedCubeWire(xrayLines, matrix, moveHandle.position(), moveHandle.halfSize() + 0.01D, moveHandle.red(), moveHandle.green(), moveHandle.blue(), moveHandle.hovered() ? 225 : 150);
+        addAxisAlignedCubeWire(xrayLines, matrix, widthHandle.position(), widthHandle.halfSize() + 0.01D, widthHandle.red(), widthHandle.green(), widthHandle.blue(), widthHandle.hovered() ? 225 : 150);
+        addAxisAlignedCubeWire(xrayLines, matrix, widthHandleMirror.position(), widthHandleMirror.halfSize() + 0.01D, widthHandleMirror.red(), widthHandleMirror.green(), widthHandleMirror.blue(), widthHandleMirror.hovered() ? 225 : 150);
+        addAxisAlignedCubeWire(xrayLines, matrix, heightHandle.position(), heightHandle.halfSize() + 0.01D, heightHandle.red(), heightHandle.green(), heightHandle.blue(), heightHandle.hovered() ? 225 : 150);
+        addAxisAlignedCubeWire(xrayLines, matrix, heightHandleMirror.position(), heightHandleMirror.halfSize() + 0.01D, heightHandleMirror.red(), heightHandleMirror.green(), heightHandleMirror.blue(), heightHandleMirror.hovered() ? 225 : 150);
+        addAxisAlignedCubeWire(xrayLines, matrix, depthHandle.position(), depthHandle.halfSize() + 0.01D, depthHandle.red(), depthHandle.green(), depthHandle.blue(), depthHandle.hovered() ? 225 : 150);
+        addAxisAlignedCubeWire(xrayLines, matrix, depthHandleMirror.position(), depthHandleMirror.halfSize() + 0.01D, depthHandleMirror.red(), depthHandleMirror.green(), depthHandleMirror.blue(), depthHandleMirror.hovered() ? 225 : 150);
         BufferRenderer.drawWithGlobalProgram(xrayLines.end());
 
         RenderSystem.enableDepthTest();
         RenderSystem.depthMask(true);
         RenderSystem.enableCull();
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
+    }
+
+    private GizmoHandleVisual createHandleVisual(
+            Vec3d position,
+            double baseHalfSize,
+            PortalEditController.HandleKind handleKind,
+            @Nullable PortalEditController.HandleKind hoveredHandle,
+            int red,
+            int green,
+            int blue
+    ) {
+        boolean hovered = hoveredHandle == handleKind;
+        double scaledHalfSize = baseHalfSize * portalEditController.handleScale(handleKind);
+        return new GizmoHandleVisual(
+                position,
+                scaledHalfSize,
+                tintChannel(red, hovered),
+                tintChannel(green, hovered),
+                tintChannel(blue, hovered),
+                hovered
+        );
     }
 
     private void renderDebugPlanes(List<DebugPlaneInstance> debugPlanes, Matrix4f matrix) {
@@ -1401,6 +1517,94 @@ public final class PortalSceneRenderer {
         addLine(lines, matrix, center.subtract(b), center.add(b), red, green, blue, alpha);
     }
 
+    private static void addAxisGuide(
+            BufferBuilder lines,
+            Matrix4f matrix,
+            Vec3d center,
+            Vec3d axisDirection,
+            double halfLength,
+            double arrowSize,
+            int red,
+            int green,
+            int blue,
+            int alpha
+    ) {
+        Vec3d axis = axisDirection.normalize();
+        if (axis.lengthSquared() <= 1.0E-8D) {
+            return;
+        }
+
+        Vec3d positive = center.add(axis.multiply(halfLength));
+        Vec3d negative = center.subtract(axis.multiply(halfLength));
+        addLine(lines, matrix, negative, positive, red, green, blue, alpha);
+
+        Vec3d sideA = perpendicularUnit(axis);
+        Vec3d sideB = axis.crossProduct(sideA).normalize();
+        Vec3d positiveBase = positive.subtract(axis.multiply(arrowSize));
+        Vec3d negativeBase = negative.add(axis.multiply(arrowSize));
+        double wing = arrowSize * 0.42D;
+
+        addLine(lines, matrix, positive, positiveBase.add(sideA.multiply(wing)), red, green, blue, alpha);
+        addLine(lines, matrix, positive, positiveBase.subtract(sideA.multiply(wing)), red, green, blue, alpha);
+        addLine(lines, matrix, positive, positiveBase.add(sideB.multiply(wing)), red, green, blue, alpha);
+        addLine(lines, matrix, positive, positiveBase.subtract(sideB.multiply(wing)), red, green, blue, alpha);
+
+        addLine(lines, matrix, negative, negativeBase.add(sideA.multiply(wing)), red, green, blue, alpha);
+        addLine(lines, matrix, negative, negativeBase.subtract(sideA.multiply(wing)), red, green, blue, alpha);
+        addLine(lines, matrix, negative, negativeBase.add(sideB.multiply(wing)), red, green, blue, alpha);
+        addLine(lines, matrix, negative, negativeBase.subtract(sideB.multiply(wing)), red, green, blue, alpha);
+    }
+
+    private static void addMovementAxisPreview(
+            BufferBuilder lines,
+            Matrix4f matrix,
+            Vec3d center,
+            Vec3d right,
+            Vec3d up,
+            Vec3d normal,
+            @Nullable PortalEditController.HandleKind hoveredHandle,
+            double rightHalfLength,
+            double upHalfLength,
+            double depthHalfLength,
+            double arrowSize,
+            int alpha
+    ) {
+        if (hoveredHandle == null) {
+            return;
+        }
+
+        switch (hoveredHandle) {
+            case WIDTH_POSITIVE, WIDTH_NEGATIVE -> addAxisGuide(
+                    lines, matrix, center, right, rightHalfLength, arrowSize,
+                    255, 84, 84, alpha
+            );
+            case HEIGHT_POSITIVE, HEIGHT_NEGATIVE -> addAxisGuide(
+                    lines, matrix, center, up, upHalfLength, arrowSize,
+                    84, 255, 124, alpha
+            );
+            case DEPTH_POSITIVE, DEPTH_NEGATIVE -> addAxisGuide(
+                    lines, matrix, center, normal, depthHalfLength, arrowSize,
+                    84, 150, 255, alpha
+            );
+            case MOVE -> {
+                addAxisGuide(lines, matrix, center, right, rightHalfLength, arrowSize, 255, 84, 84, alpha);
+                addAxisGuide(lines, matrix, center, up, upHalfLength, arrowSize, 84, 255, 124, alpha);
+            }
+        }
+    }
+
+    private static Vec3d perpendicularUnit(Vec3d axis) {
+        Vec3d candidate = Math.abs(axis.y) < 0.9D ? new Vec3d(0.0D, 1.0D, 0.0D) : new Vec3d(1.0D, 0.0D, 0.0D);
+        Vec3d side = axis.crossProduct(candidate);
+        if (side.lengthSquared() <= 1.0E-8D) {
+            side = axis.crossProduct(new Vec3d(0.0D, 0.0D, 1.0D));
+        }
+        if (side.lengthSquared() <= 1.0E-8D) {
+            return new Vec3d(1.0D, 0.0D, 0.0D);
+        }
+        return side.normalize();
+    }
+
     private static void addVertex(
             BufferBuilder buffer,
             Matrix4f matrix,
@@ -1411,6 +1615,14 @@ public final class PortalSceneRenderer {
             int alpha
     ) {
         buffer.vertex(matrix, (float) position.x, (float) position.y, (float) position.z).color(red, green, blue, alpha);
+    }
+
+    private static int tintChannel(int channel, boolean hovered) {
+        if (!hovered) {
+            return channel;
+        }
+        int boosted = (int) Math.round(channel + (255 - channel) * 0.45D);
+        return Math.max(0, Math.min(255, boosted));
     }
 
     private static void drawScreenTriangle() {
@@ -1645,6 +1857,16 @@ public final class PortalSceneRenderer {
             }
             meshes.add(new CachedLayerMesh(layer, vertexBuffer));
         }
+    }
+
+    private record GizmoHandleVisual(
+            Vec3d position,
+            double halfSize,
+            int red,
+            int green,
+            int blue,
+            boolean hovered
+    ) {
     }
 
     private static double squaredHorizontalDistance(Vec3d a, Vec3d b) {

@@ -3,6 +3,9 @@ package padej.client.portal;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.Camera;
 import net.minecraft.text.Text;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.glfw.GLFW;
@@ -11,9 +14,11 @@ import java.util.Optional;
 import java.util.UUID;
 
 public final class PortalEditController {
-    private static final double MOVE_HANDLE_HALF_SIZE = 0.20D;
-    private static final double RESIZE_HANDLE_HALF_SIZE = 0.20D;
+    private static final double HANDLE_VISUAL_HALF_SIZE = 1.0D / 32.0D; // cube side = 1/16 block
+    private static final double MOVE_HANDLE_HIT_HALF_SIZE = 0.22D;
+    private static final double RESIZE_HANDLE_HIT_HALF_SIZE = 0.18D;
     private static final double HANDLE_OFFSET = 0.65D;
+    private static final double DEPTH_HANDLE_OFFSET = 0.80D;
     private static final double GRID_STEP_BLOCK = 1.0D;
     private static final double GRID_STEP_FINE = 0.25D;
 
@@ -25,6 +30,8 @@ public final class PortalEditController {
     private String editingSceneName;
     @Nullable
     private DragState activeDrag;
+    @Nullable
+    private HandleKind hoveredHandle;
     private boolean primaryDownLastTick = false;
 
     public PortalEditController(PortalManager portalManager) {
@@ -40,6 +47,7 @@ public final class PortalEditController {
         this.editingPortalId = portal.get().id();
         this.editingSceneName = portal.get().sceneName();
         this.activeDrag = null;
+        this.hoveredHandle = null;
         this.primaryDownLastTick = false;
         return true;
     }
@@ -51,6 +59,7 @@ public final class PortalEditController {
         editingPortalId = null;
         editingSceneName = null;
         activeDrag = null;
+        hoveredHandle = null;
         primaryDownLastTick = false;
         return true;
     }
@@ -73,11 +82,14 @@ public final class PortalEditController {
 
         Vec3d right = portal.right().normalize();
         Vec3d up = portal.up().normalize();
+        Vec3d normal = portal.normal().normalize();
         Vec3d center = portal.center();
         Vec3d widthHandlePos = center.add(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
         Vec3d widthHandleNeg = center.subtract(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
         Vec3d heightHandlePos = center.add(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
         Vec3d heightHandleNeg = center.subtract(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
+        Vec3d depthHandlePos = center.add(normal.multiply(DEPTH_HANDLE_OFFSET));
+        Vec3d depthHandleNeg = center.subtract(normal.multiply(DEPTH_HANDLE_OFFSET));
 
         return new GizmoHandles(
                 portal,
@@ -86,9 +98,25 @@ public final class PortalEditController {
                 widthHandleNeg,
                 heightHandlePos,
                 heightHandleNeg,
-                MOVE_HANDLE_HALF_SIZE,
-                RESIZE_HANDLE_HALF_SIZE
+                depthHandlePos,
+                depthHandleNeg,
+                HANDLE_VISUAL_HALF_SIZE,
+                HANDLE_VISUAL_HALF_SIZE
         );
+    }
+
+    @Nullable
+    public HandleKind hoveredHandle() {
+        return hoveredHandle;
+    }
+
+    public double handleScale(HandleKind handle) {
+        if (handle != hoveredHandle) {
+            return 1.0D;
+        }
+        long nowMillis = System.currentTimeMillis();
+        double pulse = 0.5D + 0.5D * Math.sin(nowMillis * 0.014D + handle.ordinal() * 0.9D);
+        return 1.35D + pulse * 0.20D;
     }
 
     @Nullable
@@ -117,11 +145,13 @@ public final class PortalEditController {
         if (editingPortalId == null && editingSceneName == null) {
             primaryDownLastTick = false;
             activeDrag = null;
+            hoveredHandle = null;
             return;
         }
 
         if (client.world == null || client.player == null || client.currentScreen != null) {
             activeDrag = null;
+            hoveredHandle = null;
             primaryDownLastTick = false;
             return;
         }
@@ -135,8 +165,16 @@ public final class PortalEditController {
         Ray cameraRay = getCameraRay(client);
         if (cameraRay == null) {
             activeDrag = null;
+            hoveredHandle = null;
             primaryDownLastTick = false;
             return;
+        }
+
+        HandleChoice hoveredChoice = pickHandleChoice(currentPortal, cameraRay);
+        hoveredHandle = hoveredChoice == null ? null : hoveredChoice.kind();
+
+        if (hoveredChoice != null || activeDrag != null) {
+            suppressWorldInteractions(client, cameraRay, activeDrag != null);
         }
 
         long windowHandle = client.getWindow().getHandle();
@@ -153,7 +191,7 @@ public final class PortalEditController {
 
         PortalInstance portal = currentPortal;
         if (!primaryDownLastTick) {
-            beginDrag(portal, cameraRay);
+            beginDrag(portal, cameraRay, hoveredChoice);
         } else {
             updateDrag(portal, cameraRay, gridStep);
             PortalInstance updatedPortal = editingPortal();
@@ -162,25 +200,33 @@ public final class PortalEditController {
             }
         }
 
+        if (activeDrag != null) {
+            hoveredHandle = activeDrag.handleKind();
+        }
+
         sendActionbar(client, portal, gridStep);
         primaryDownLastTick = primaryDown;
     }
 
-    private void beginDrag(PortalInstance portal, Ray ray) {
-        DragMode mode = pickDragMode(portal, ray);
-        if (mode == null) {
+    private void beginDrag(PortalInstance portal, Ray ray, @Nullable HandleChoice hoveredChoice) {
+        HandleChoice choice = hoveredChoice == null ? pickHandleChoice(portal, ray) : hoveredChoice;
+        if (choice == null) {
             activeDrag = null;
             return;
         }
 
         Vec3d planeIntersection = intersectRayPlane(ray, portal.center(), portal.normal());
-        if (planeIntersection == null) {
+        if (planeIntersection == null && choice.mode() != DragMode.DEPTH) {
             activeDrag = null;
             return;
         }
+        if (planeIntersection == null) {
+            planeIntersection = portal.center();
+        }
 
         activeDrag = new DragState(
-                mode,
+                choice.mode(),
+                choice.kind(),
                 planeIntersection,
                 portal.center(),
                 portal.sceneAnchor(),
@@ -195,15 +241,16 @@ public final class PortalEditController {
             return;
         }
 
-        Vec3d planeIntersection = intersectRayPlane(ray, drag.startCenter(), portal.normal());
-        if (planeIntersection == null) {
-            return;
-        }
-
         Vec3d right = portal.right().normalize();
         Vec3d up = portal.up().normalize();
+        Vec3d normal = portal.normal().normalize();
         switch (drag.mode()) {
             case MOVE -> {
+                Vec3d planeIntersection = intersectRayPlane(ray, drag.startCenter(), portal.normal());
+                if (planeIntersection == null) {
+                    return;
+                }
+
                 Vec3d delta = planeIntersection.subtract(drag.startPlaneIntersection());
                 double alongRight = snapToStep(delta.dotProduct(right), gridStep);
                 double alongUp = snapToStep(delta.dotProduct(up), gridStep);
@@ -212,7 +259,6 @@ public final class PortalEditController {
                         .add(up.multiply(alongUp));
                 Vec3d centerDelta = snappedCenter.subtract(drag.startCenter());
                 Vec3d movedSceneAnchor = drag.startSceneAnchor().add(centerDelta);
-
                 portalManager.updatePortalGeometry(
                         portal.id(),
                         snappedCenter,
@@ -222,6 +268,11 @@ public final class PortalEditController {
                 );
             }
             case WIDTH -> {
+                Vec3d planeIntersection = intersectRayPlane(ray, drag.startCenter(), portal.normal());
+                if (planeIntersection == null) {
+                    return;
+                }
+
                 Vec3d relative = planeIntersection.subtract(drag.startCenter());
                 double nextWidth = Math.max(1.0D, snapToStep(Math.abs(relative.dotProduct(right)) * 2.0D, gridStep));
                 portalManager.updatePortalGeometry(
@@ -233,6 +284,11 @@ public final class PortalEditController {
                 );
             }
             case HEIGHT -> {
+                Vec3d planeIntersection = intersectRayPlane(ray, drag.startCenter(), portal.normal());
+                if (planeIntersection == null) {
+                    return;
+                }
+
                 Vec3d relative = planeIntersection.subtract(drag.startCenter());
                 double nextHeight = Math.max(1.0D, snapToStep(Math.abs(relative.dotProduct(up)) * 2.0D, gridStep));
                 portalManager.updatePortalGeometry(
@@ -243,7 +299,38 @@ public final class PortalEditController {
                         nextHeight
                 );
             }
+            case DEPTH -> {
+                double alongDepth = axisDeltaFromRay(ray, drag.startCenter(), normal);
+                if (!Double.isFinite(alongDepth)) {
+                    return;
+                }
+                double snappedDepth = snapToStep(alongDepth, gridStep);
+                Vec3d depthDelta = normal.multiply(snappedDepth);
+                portalManager.updatePortalGeometry(
+                        portal.id(),
+                        drag.startCenter().add(depthDelta),
+                        drag.startSceneAnchor().add(depthDelta),
+                        drag.startWidth(),
+                        drag.startHeight()
+                );
+            }
         }
+    }
+
+    private static void suppressWorldInteractions(MinecraftClient client, Ray ray, boolean cancelBreaking) {
+        if (client.options != null) {
+            client.options.attackKey.setPressed(false);
+            client.options.useKey.setPressed(false);
+            client.options.pickItemKey.setPressed(false);
+        }
+        if (cancelBreaking && client.interactionManager != null) {
+            client.interactionManager.cancelBlockBreaking();
+        }
+
+        Vec3d missPos = ray.origin().add(ray.direction().multiply(4.0D));
+        BlockPos missBlockPos = BlockPos.ofFloored(missPos);
+        client.crosshairTarget = BlockHitResult.createMissed(missPos, Direction.UP, missBlockPos);
+        client.targetedEntity = null;
     }
 
     @Nullable
@@ -263,31 +350,41 @@ public final class PortalEditController {
     }
 
     @Nullable
-    private static DragMode pickDragMode(PortalInstance portal, Ray ray) {
+    private static HandleChoice pickHandleChoice(PortalInstance portal, Ray ray) {
         Vec3d right = portal.right().normalize();
         Vec3d up = portal.up().normalize();
+        Vec3d normal = portal.normal().normalize();
         Vec3d center = portal.center();
         Vec3d widthHandlePos = center.add(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
         Vec3d widthHandleNeg = center.subtract(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
         Vec3d heightHandlePos = center.add(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
         Vec3d heightHandleNeg = center.subtract(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
+        Vec3d depthHandlePos = center.add(normal.multiply(DEPTH_HANDLE_OFFSET));
+        Vec3d depthHandleNeg = center.subtract(normal.multiply(DEPTH_HANDLE_OFFSET));
 
-        DragChoice best = null;
-        best = chooseBest(best, DragMode.WIDTH, rayAabbDistance(ray, widthHandlePos, RESIZE_HANDLE_HALF_SIZE));
-        best = chooseBest(best, DragMode.WIDTH, rayAabbDistance(ray, widthHandleNeg, RESIZE_HANDLE_HALF_SIZE));
-        best = chooseBest(best, DragMode.HEIGHT, rayAabbDistance(ray, heightHandlePos, RESIZE_HANDLE_HALF_SIZE));
-        best = chooseBest(best, DragMode.HEIGHT, rayAabbDistance(ray, heightHandleNeg, RESIZE_HANDLE_HALF_SIZE));
-        best = chooseBest(best, DragMode.MOVE, rayAabbDistance(ray, center, MOVE_HANDLE_HALF_SIZE));
-        return best == null ? null : best.mode();
+        HandleChoice best = null;
+        best = chooseBest(best, HandleKind.WIDTH_POSITIVE, DragMode.WIDTH, rayAabbDistance(ray, widthHandlePos, RESIZE_HANDLE_HIT_HALF_SIZE));
+        best = chooseBest(best, HandleKind.WIDTH_NEGATIVE, DragMode.WIDTH, rayAabbDistance(ray, widthHandleNeg, RESIZE_HANDLE_HIT_HALF_SIZE));
+        best = chooseBest(best, HandleKind.HEIGHT_POSITIVE, DragMode.HEIGHT, rayAabbDistance(ray, heightHandlePos, RESIZE_HANDLE_HIT_HALF_SIZE));
+        best = chooseBest(best, HandleKind.HEIGHT_NEGATIVE, DragMode.HEIGHT, rayAabbDistance(ray, heightHandleNeg, RESIZE_HANDLE_HIT_HALF_SIZE));
+        best = chooseBest(best, HandleKind.DEPTH_POSITIVE, DragMode.DEPTH, rayAabbDistance(ray, depthHandlePos, RESIZE_HANDLE_HIT_HALF_SIZE));
+        best = chooseBest(best, HandleKind.DEPTH_NEGATIVE, DragMode.DEPTH, rayAabbDistance(ray, depthHandleNeg, RESIZE_HANDLE_HIT_HALF_SIZE));
+        best = chooseBest(best, HandleKind.MOVE, DragMode.MOVE, rayAabbDistance(ray, center, MOVE_HANDLE_HIT_HALF_SIZE));
+        return best;
     }
 
     @Nullable
-    private static DragChoice chooseBest(@Nullable DragChoice current, DragMode mode, double distance) {
+    private static HandleChoice chooseBest(
+            @Nullable HandleChoice current,
+            HandleKind handleKind,
+            DragMode mode,
+            double distance
+    ) {
         if (!Double.isFinite(distance) || distance <= 0.0D) {
             return current;
         }
         if (current == null || distance < current.distance()) {
-            return new DragChoice(mode, distance);
+            return new HandleChoice(handleKind, mode, distance);
         }
         return current;
     }
@@ -365,7 +462,22 @@ public final class PortalEditController {
     private enum DragMode {
         MOVE,
         WIDTH,
-        HEIGHT
+        HEIGHT,
+        DEPTH
+    }
+
+    private static double axisDeltaFromRay(Ray ray, Vec3d axisOrigin, Vec3d axisDirection) {
+        double a = axisDirection.dotProduct(axisDirection);
+        double b = axisDirection.dotProduct(ray.direction());
+        double c = ray.direction().dotProduct(ray.direction());
+        Vec3d w0 = axisOrigin.subtract(ray.origin());
+        double d = axisDirection.dotProduct(w0);
+        double e = ray.direction().dotProduct(w0);
+        double denominator = a * c - b * b;
+        if (Math.abs(denominator) < 1.0E-6D) {
+            return -d;
+        }
+        return (b * e - c * d) / denominator;
     }
 
     private static double snapToStep(double value, double step) {
@@ -401,11 +513,12 @@ public final class PortalEditController {
     private record Ray(Vec3d origin, Vec3d direction) {
     }
 
-    private record DragChoice(DragMode mode, double distance) {
+    private record HandleChoice(HandleKind kind, DragMode mode, double distance) {
     }
 
     private record DragState(
             DragMode mode,
+            HandleKind handleKind,
             Vec3d startPlaneIntersection,
             Vec3d startCenter,
             Vec3d startSceneAnchor,
@@ -421,8 +534,20 @@ public final class PortalEditController {
             Vec3d widthHandleNegative,
             Vec3d heightHandlePositive,
             Vec3d heightHandleNegative,
+            Vec3d depthHandlePositive,
+            Vec3d depthHandleNegative,
             double moveHalfSize,
             double resizeHalfSize
     ) {
+    }
+
+    public enum HandleKind {
+        MOVE,
+        WIDTH_POSITIVE,
+        WIDTH_NEGATIVE,
+        HEIGHT_POSITIVE,
+        HEIGHT_NEGATIVE,
+        DEPTH_POSITIVE,
+        DEPTH_NEGATIVE
     }
 }
