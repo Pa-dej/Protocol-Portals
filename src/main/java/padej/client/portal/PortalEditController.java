@@ -2,6 +2,7 @@ package padej.client.portal;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.Camera;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.glfw.GLFW;
@@ -10,8 +11,11 @@ import java.util.Optional;
 import java.util.UUID;
 
 public final class PortalEditController {
-    private static final double HANDLE_RADIUS = 0.32D;
+    private static final double MOVE_HANDLE_HALF_SIZE = 0.20D;
+    private static final double RESIZE_HANDLE_HALF_SIZE = 0.20D;
     private static final double HANDLE_OFFSET = 0.65D;
+    private static final double GRID_STEP_BLOCK = 1.0D;
+    private static final double GRID_STEP_FINE = 0.25D;
 
     private final PortalManager portalManager;
 
@@ -58,6 +62,33 @@ public final class PortalEditController {
 
     public boolean isEditing() {
         return editingPortalId != null || editingSceneName != null;
+    }
+
+    @Nullable
+    public GizmoHandles gizmoHandles() {
+        PortalInstance portal = editingPortal();
+        if (portal == null) {
+            return null;
+        }
+
+        Vec3d right = portal.right().normalize();
+        Vec3d up = portal.up().normalize();
+        Vec3d center = portal.center();
+        Vec3d widthHandlePos = center.add(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
+        Vec3d widthHandleNeg = center.subtract(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
+        Vec3d heightHandlePos = center.add(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
+        Vec3d heightHandleNeg = center.subtract(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
+
+        return new GizmoHandles(
+                portal,
+                center,
+                widthHandlePos,
+                widthHandleNeg,
+                heightHandlePos,
+                heightHandleNeg,
+                MOVE_HANDLE_HALF_SIZE,
+                RESIZE_HANDLE_HALF_SIZE
+        );
     }
 
     @Nullable
@@ -110,10 +141,12 @@ public final class PortalEditController {
 
         long windowHandle = client.getWindow().getHandle();
         boolean primaryDown = GLFW.glfwGetMouseButton(windowHandle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
-        boolean sneaking = client.player.isSneaking();
+        boolean fineGrid = client.player.isSneaking();
+        double gridStep = fineGrid ? GRID_STEP_FINE : GRID_STEP_BLOCK;
 
-        if (!primaryDown || !sneaking) {
+        if (!primaryDown) {
             activeDrag = null;
+            sendActionbar(client, currentPortal, gridStep);
             primaryDownLastTick = primaryDown;
             return;
         }
@@ -122,9 +155,14 @@ public final class PortalEditController {
         if (!primaryDownLastTick) {
             beginDrag(portal, cameraRay);
         } else {
-            updateDrag(portal, cameraRay);
+            updateDrag(portal, cameraRay, gridStep);
+            PortalInstance updatedPortal = editingPortal();
+            if (updatedPortal != null) {
+                portal = updatedPortal;
+            }
         }
 
+        sendActionbar(client, portal, gridStep);
         primaryDownLastTick = primaryDown;
     }
 
@@ -151,7 +189,7 @@ public final class PortalEditController {
         );
     }
 
-    private void updateDrag(PortalInstance portal, Ray ray) {
+    private void updateDrag(PortalInstance portal, Ray ray, double gridStep) {
         DragState drag = activeDrag;
         if (drag == null) {
             return;
@@ -162,15 +200,16 @@ public final class PortalEditController {
             return;
         }
 
+        Vec3d right = portal.right().normalize();
+        Vec3d up = portal.up().normalize();
         switch (drag.mode()) {
             case MOVE -> {
                 Vec3d delta = planeIntersection.subtract(drag.startPlaneIntersection());
-                double alongRight = delta.dotProduct(portal.right());
-                double alongUp = delta.dotProduct(portal.up());
-                Vec3d planarDelta = portal.right().multiply(alongRight).add(portal.up().multiply(alongUp));
-
-                Vec3d desiredCenter = drag.startCenter().add(planarDelta);
-                Vec3d snappedCenter = PortalManager.snapPortalCenterToBlockGrid(desiredCenter, portal.normal());
+                double alongRight = snapToStep(delta.dotProduct(right), gridStep);
+                double alongUp = snapToStep(delta.dotProduct(up), gridStep);
+                Vec3d snappedCenter = drag.startCenter()
+                        .add(right.multiply(alongRight))
+                        .add(up.multiply(alongUp));
                 Vec3d centerDelta = snappedCenter.subtract(drag.startCenter());
                 Vec3d movedSceneAnchor = drag.startSceneAnchor().add(centerDelta);
 
@@ -184,7 +223,7 @@ public final class PortalEditController {
             }
             case WIDTH -> {
                 Vec3d relative = planeIntersection.subtract(drag.startCenter());
-                double nextWidth = Math.max(1.0D, Math.round(Math.abs(relative.dotProduct(portal.right())) * 2.0D));
+                double nextWidth = Math.max(1.0D, snapToStep(Math.abs(relative.dotProduct(right)) * 2.0D, gridStep));
                 portalManager.updatePortalGeometry(
                         portal.id(),
                         drag.startCenter(),
@@ -195,7 +234,7 @@ public final class PortalEditController {
             }
             case HEIGHT -> {
                 Vec3d relative = planeIntersection.subtract(drag.startCenter());
-                double nextHeight = Math.max(1.0D, Math.round(Math.abs(relative.dotProduct(portal.up())) * 2.0D));
+                double nextHeight = Math.max(1.0D, snapToStep(Math.abs(relative.dotProduct(up)) * 2.0D, gridStep));
                 portalManager.updatePortalGeometry(
                         portal.id(),
                         drag.startCenter(),
@@ -225,18 +264,20 @@ public final class PortalEditController {
 
     @Nullable
     private static DragMode pickDragMode(PortalInstance portal, Ray ray) {
+        Vec3d right = portal.right().normalize();
+        Vec3d up = portal.up().normalize();
         Vec3d center = portal.center();
-        Vec3d widthHandlePos = center.add(portal.right().multiply(portal.width() * 0.5D + HANDLE_OFFSET));
-        Vec3d widthHandleNeg = center.subtract(portal.right().multiply(portal.width() * 0.5D + HANDLE_OFFSET));
-        Vec3d heightHandlePos = center.add(portal.up().multiply(portal.height() * 0.5D + HANDLE_OFFSET));
-        Vec3d heightHandleNeg = center.subtract(portal.up().multiply(portal.height() * 0.5D + HANDLE_OFFSET));
+        Vec3d widthHandlePos = center.add(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
+        Vec3d widthHandleNeg = center.subtract(right.multiply(portal.width() * 0.5D + HANDLE_OFFSET));
+        Vec3d heightHandlePos = center.add(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
+        Vec3d heightHandleNeg = center.subtract(up.multiply(portal.height() * 0.5D + HANDLE_OFFSET));
 
         DragChoice best = null;
-        best = chooseBest(best, DragMode.WIDTH, raySphereDistance(ray, widthHandlePos, HANDLE_RADIUS));
-        best = chooseBest(best, DragMode.WIDTH, raySphereDistance(ray, widthHandleNeg, HANDLE_RADIUS));
-        best = chooseBest(best, DragMode.HEIGHT, raySphereDistance(ray, heightHandlePos, HANDLE_RADIUS));
-        best = chooseBest(best, DragMode.HEIGHT, raySphereDistance(ray, heightHandleNeg, HANDLE_RADIUS));
-        best = chooseBest(best, DragMode.MOVE, raySphereDistance(ray, center, HANDLE_RADIUS * 1.2D));
+        best = chooseBest(best, DragMode.WIDTH, rayAabbDistance(ray, widthHandlePos, RESIZE_HANDLE_HALF_SIZE));
+        best = chooseBest(best, DragMode.WIDTH, rayAabbDistance(ray, widthHandleNeg, RESIZE_HANDLE_HALF_SIZE));
+        best = chooseBest(best, DragMode.HEIGHT, rayAabbDistance(ray, heightHandlePos, RESIZE_HANDLE_HALF_SIZE));
+        best = chooseBest(best, DragMode.HEIGHT, rayAabbDistance(ray, heightHandleNeg, RESIZE_HANDLE_HALF_SIZE));
+        best = chooseBest(best, DragMode.MOVE, rayAabbDistance(ray, center, MOVE_HANDLE_HALF_SIZE));
         return best == null ? null : best.mode();
     }
 
@@ -251,23 +292,49 @@ public final class PortalEditController {
         return current;
     }
 
-    private static double raySphereDistance(Ray ray, Vec3d center, double radius) {
-        Vec3d offset = ray.origin().subtract(center);
-        double b = offset.dotProduct(ray.direction());
-        double c = offset.lengthSquared() - radius * radius;
-        double h = b * b - c;
-        if (h < 0.0D) {
+    private static double rayAabbDistance(Ray ray, Vec3d center, double halfSize) {
+        double minX = center.x - halfSize;
+        double minY = center.y - halfSize;
+        double minZ = center.z - halfSize;
+        double maxX = center.x + halfSize;
+        double maxY = center.y + halfSize;
+        double maxZ = center.z + halfSize;
+
+        double tMin = Double.NEGATIVE_INFINITY;
+        double tMax = Double.POSITIVE_INFINITY;
+
+        double[] origin = {ray.origin().x, ray.origin().y, ray.origin().z};
+        double[] direction = {ray.direction().x, ray.direction().y, ray.direction().z};
+        double[] min = {minX, minY, minZ};
+        double[] max = {maxX, maxY, maxZ};
+
+        for (int axis = 0; axis < 3; axis++) {
+            double d = direction[axis];
+            double o = origin[axis];
+            if (Math.abs(d) < 1.0E-8D) {
+                if (o < min[axis] || o > max[axis]) {
+                    return Double.NaN;
+                }
+                continue;
+            }
+
+            double inv = 1.0D / d;
+            double t1 = (min[axis] - o) * inv;
+            double t2 = (max[axis] - o) * inv;
+            double near = Math.min(t1, t2);
+            double far = Math.max(t1, t2);
+
+            tMin = Math.max(tMin, near);
+            tMax = Math.min(tMax, far);
+            if (tMin > tMax) {
+                return Double.NaN;
+            }
+        }
+
+        if (tMax <= 0.0D) {
             return Double.NaN;
         }
-
-        double sqrt = Math.sqrt(h);
-        double near = -b - sqrt;
-        if (near > 0.0D) {
-            return near;
-        }
-
-        double far = -b + sqrt;
-        return far > 0.0D ? far : Double.NaN;
+        return tMin > 0.0D ? tMin : tMax;
     }
 
     @Nullable
@@ -301,6 +368,36 @@ public final class PortalEditController {
         HEIGHT
     }
 
+    private static double snapToStep(double value, double step) {
+        if (step <= 1.0E-6D) {
+            return value;
+        }
+        return Math.round(value / step) * step;
+    }
+
+    private static String formatCoordinate(double value) {
+        return String.format(java.util.Locale.ROOT, "%.2f", value);
+    }
+
+    private static void sendActionbar(MinecraftClient client, PortalInstance portal, double gridStep) {
+        if (client.player == null || client.world == null) {
+            return;
+        }
+        String dimension = client.world.getRegistryKey().getValue().toString();
+        String text = String.format(
+                java.util.Locale.ROOT,
+                "PP Edit | dim: %s | pos: (%s, %s, %s) | size: %.2f x %.2f | grid: %.2f",
+                dimension,
+                formatCoordinate(portal.center().x),
+                formatCoordinate(portal.center().y),
+                formatCoordinate(portal.center().z),
+                portal.width(),
+                portal.height(),
+                gridStep
+        );
+        client.player.sendMessage(Text.literal(text), true);
+    }
+
     private record Ray(Vec3d origin, Vec3d direction) {
     }
 
@@ -314,6 +411,18 @@ public final class PortalEditController {
             Vec3d startSceneAnchor,
             double startWidth,
             double startHeight
+    ) {
+    }
+
+    public record GizmoHandles(
+            PortalInstance portal,
+            Vec3d moveHandle,
+            Vec3d widthHandlePositive,
+            Vec3d widthHandleNegative,
+            Vec3d heightHandlePositive,
+            Vec3d heightHandleNegative,
+            double moveHalfSize,
+            double resizeHalfSize
     ) {
     }
 }

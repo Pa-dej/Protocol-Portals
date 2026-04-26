@@ -285,8 +285,8 @@ public final class ProtocolPortalsCommand {
 
         source.sendFeedback(Text.literal(
                 "Portal edit mode enabled for '" + sceneName + "'. "
-                        + "Controls: hold Sneak + LMB on gizmo handles. Center handle moves portal on block grid; "
-                        + "red handles change width; green handles change height. Use /pp edit stop to finish."
+                        + "Controls: hold LMB on gizmo cubes. Center cube moves portal; red cubes change width; "
+                        + "green cubes change height. Grid: 1.0 block (Shift -> 0.25). Use /pp edit stop to finish."
         ));
         return 1;
     }

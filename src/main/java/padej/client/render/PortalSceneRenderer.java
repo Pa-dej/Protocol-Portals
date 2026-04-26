@@ -479,11 +479,12 @@ public final class PortalSceneRenderer {
     }
 
     private void renderPortalEditGizmo(Matrix4f matrix) {
-        PortalInstance portal = portalEditController.editingPortal();
-        if (portal == null) {
+        PortalEditController.GizmoHandles gizmo = portalEditController.gizmoHandles();
+        if (gizmo == null) {
             return;
         }
 
+        PortalInstance portal = gizmo.portal();
         Vec3d center = portal.center();
         Vec3d right = portal.right().normalize();
         Vec3d up = portal.up().normalize();
@@ -492,11 +493,11 @@ public final class PortalSceneRenderer {
         double viewerSide = cameraPos.subtract(center).dotProduct(normal);
         Vec3d overlayOffset = normal.multiply((viewerSide >= 0.0D ? 1.0D : -1.0D) * 0.04D);
 
-        center = center.add(overlayOffset);
-        Vec3d widthHandle = center.add(right.multiply(portal.width() * 0.5D + 0.65D));
-        Vec3d widthHandleMirror = center.subtract(right.multiply(portal.width() * 0.5D + 0.65D));
-        Vec3d heightHandle = center.add(up.multiply(portal.height() * 0.5D + 0.65D));
-        Vec3d heightHandleMirror = center.subtract(up.multiply(portal.height() * 0.5D + 0.65D));
+        Vec3d moveHandle = gizmo.moveHandle().add(overlayOffset);
+        Vec3d widthHandle = gizmo.widthHandlePositive().add(overlayOffset);
+        Vec3d widthHandleMirror = gizmo.widthHandleNegative().add(overlayOffset);
+        Vec3d heightHandle = gizmo.heightHandlePositive().add(overlayOffset);
+        Vec3d heightHandleMirror = gizmo.heightHandleNegative().add(overlayOffset);
 
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
@@ -507,41 +508,46 @@ public final class PortalSceneRenderer {
         usePortalAreaShader();
 
         BufferBuilder gizmoFills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        addPlaneQuad(gizmoFills, matrix, center, right, up, 0.24D, 0.24D, 255, 255, 255, 200);
-        addPlaneQuad(gizmoFills, matrix, widthHandle, right, up, 0.24D, 0.24D, 255, 96, 96, 220);
-        addPlaneQuad(gizmoFills, matrix, widthHandleMirror, right, up, 0.24D, 0.24D, 255, 96, 96, 220);
-        addPlaneQuad(gizmoFills, matrix, heightHandle, right, up, 0.24D, 0.24D, 96, 255, 128, 220);
-        addPlaneQuad(gizmoFills, matrix, heightHandleMirror, right, up, 0.24D, 0.24D, 96, 255, 128, 220);
+        addAxisAlignedCube(gizmoFills, matrix, moveHandle, gizmo.moveHalfSize(), 255, 255, 255, 220);
+        addAxisAlignedCube(gizmoFills, matrix, widthHandle, gizmo.resizeHalfSize(), 255, 96, 96, 230);
+        addAxisAlignedCube(gizmoFills, matrix, widthHandleMirror, gizmo.resizeHalfSize(), 255, 96, 96, 230);
+        addAxisAlignedCube(gizmoFills, matrix, heightHandle, gizmo.resizeHalfSize(), 96, 255, 128, 230);
+        addAxisAlignedCube(gizmoFills, matrix, heightHandleMirror, gizmo.resizeHalfSize(), 96, 255, 128, 230);
         BufferRenderer.drawWithGlobalProgram(gizmoFills.end());
 
         BufferBuilder gizmoLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
-        addPlaneFrame(gizmoLines, matrix, center, right, up, portal.width(), portal.height(), 255, 230, 80, 255);
-        addLine(gizmoLines, matrix, center, widthHandle, 255, 96, 96, 255);
-        addLine(gizmoLines, matrix, center, widthHandleMirror, 255, 96, 96, 255);
-        addLine(gizmoLines, matrix, center, heightHandle, 96, 255, 128, 255);
-        addLine(gizmoLines, matrix, center, heightHandleMirror, 96, 255, 128, 255);
-        addHandleCross(gizmoLines, matrix, center, right, up, 0.16D, 255, 255, 255, 255);
-        addHandleCross(gizmoLines, matrix, widthHandle, right, up, 0.20D, 255, 96, 96, 255);
-        addHandleCross(gizmoLines, matrix, widthHandleMirror, right, up, 0.20D, 255, 96, 96, 255);
-        addHandleCross(gizmoLines, matrix, heightHandle, right, up, 0.20D, 96, 255, 128, 255);
-        addHandleCross(gizmoLines, matrix, heightHandleMirror, right, up, 0.20D, 96, 255, 128, 255);
+        addPlaneFrame(gizmoLines, matrix, moveHandle, right, up, portal.width(), portal.height(), 255, 230, 80, 255);
+        addLine(gizmoLines, matrix, moveHandle, widthHandle, 255, 96, 96, 255);
+        addLine(gizmoLines, matrix, moveHandle, widthHandleMirror, 255, 96, 96, 255);
+        addLine(gizmoLines, matrix, moveHandle, heightHandle, 96, 255, 128, 255);
+        addLine(gizmoLines, matrix, moveHandle, heightHandleMirror, 96, 255, 128, 255);
+        addAxisAlignedCubeWire(gizmoLines, matrix, moveHandle, gizmo.moveHalfSize(), 255, 255, 255, 255);
+        addAxisAlignedCubeWire(gizmoLines, matrix, widthHandle, gizmo.resizeHalfSize(), 255, 96, 96, 255);
+        addAxisAlignedCubeWire(gizmoLines, matrix, widthHandleMirror, gizmo.resizeHalfSize(), 255, 96, 96, 255);
+        addAxisAlignedCubeWire(gizmoLines, matrix, heightHandle, gizmo.resizeHalfSize(), 96, 255, 128, 255);
+        addAxisAlignedCubeWire(gizmoLines, matrix, heightHandleMirror, gizmo.resizeHalfSize(), 96, 255, 128, 255);
         BufferRenderer.drawWithGlobalProgram(gizmoLines.end());
 
         RenderSystem.disableDepthTest();
         BufferBuilder xrayFills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        addPlaneQuad(xrayFills, matrix, center, right, up, 0.28D, 0.28D, 255, 255, 255, 110);
-        addPlaneQuad(xrayFills, matrix, widthHandle, right, up, 0.28D, 0.28D, 255, 120, 120, 140);
-        addPlaneQuad(xrayFills, matrix, widthHandleMirror, right, up, 0.28D, 0.28D, 255, 120, 120, 140);
-        addPlaneQuad(xrayFills, matrix, heightHandle, right, up, 0.28D, 0.28D, 120, 255, 150, 140);
-        addPlaneQuad(xrayFills, matrix, heightHandleMirror, right, up, 0.28D, 0.28D, 120, 255, 150, 140);
+        addAxisAlignedCube(xrayFills, matrix, moveHandle, gizmo.moveHalfSize() + 0.04D, 255, 255, 255, 120);
+        addAxisAlignedCube(xrayFills, matrix, widthHandle, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 150);
+        addAxisAlignedCube(xrayFills, matrix, widthHandleMirror, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 150);
+        addAxisAlignedCube(xrayFills, matrix, heightHandle, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 150);
+        addAxisAlignedCube(xrayFills, matrix, heightHandleMirror, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 150);
         BufferRenderer.drawWithGlobalProgram(xrayFills.end());
 
         BufferBuilder xrayLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
-        addPlaneFrame(xrayLines, matrix, center, right, up, portal.width(), portal.height(), 255, 255, 180, 170);
-        addLine(xrayLines, matrix, center, widthHandle, 255, 120, 120, 170);
-        addLine(xrayLines, matrix, center, widthHandleMirror, 255, 120, 120, 170);
-        addLine(xrayLines, matrix, center, heightHandle, 120, 255, 150, 170);
-        addLine(xrayLines, matrix, center, heightHandleMirror, 120, 255, 150, 170);
+        addPlaneFrame(xrayLines, matrix, moveHandle, right, up, portal.width(), portal.height(), 255, 255, 180, 170);
+        addLine(xrayLines, matrix, moveHandle, widthHandle, 255, 120, 120, 170);
+        addLine(xrayLines, matrix, moveHandle, widthHandleMirror, 255, 120, 120, 170);
+        addLine(xrayLines, matrix, moveHandle, heightHandle, 120, 255, 150, 170);
+        addLine(xrayLines, matrix, moveHandle, heightHandleMirror, 120, 255, 150, 170);
+        addAxisAlignedCubeWire(xrayLines, matrix, moveHandle, gizmo.moveHalfSize() + 0.04D, 255, 255, 255, 170);
+        addAxisAlignedCubeWire(xrayLines, matrix, widthHandle, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 170);
+        addAxisAlignedCubeWire(xrayLines, matrix, widthHandleMirror, gizmo.resizeHalfSize() + 0.04D, 255, 120, 120, 170);
+        addAxisAlignedCubeWire(xrayLines, matrix, heightHandle, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 170);
+        addAxisAlignedCubeWire(xrayLines, matrix, heightHandleMirror, gizmo.resizeHalfSize() + 0.04D, 120, 255, 150, 170);
         BufferRenderer.drawWithGlobalProgram(xrayLines.end());
 
         RenderSystem.enableDepthTest();
@@ -1281,6 +1287,100 @@ public final class PortalSceneRenderer {
     ) {
         lines.vertex(matrix, (float) a.x, (float) a.y, (float) a.z).color(red, green, blue, alpha);
         lines.vertex(matrix, (float) b.x, (float) b.y, (float) b.z).color(red, green, blue, alpha);
+    }
+
+    private static void addAxisAlignedCube(
+            BufferBuilder buffer,
+            Matrix4f matrix,
+            Vec3d center,
+            double halfSize,
+            int red,
+            int green,
+            int blue,
+            int alpha
+    ) {
+        double minX = center.x - halfSize;
+        double minY = center.y - halfSize;
+        double minZ = center.z - halfSize;
+        double maxX = center.x + halfSize;
+        double maxY = center.y + halfSize;
+        double maxZ = center.z + halfSize;
+
+        Vec3d p000 = new Vec3d(minX, minY, minZ);
+        Vec3d p100 = new Vec3d(maxX, minY, minZ);
+        Vec3d p110 = new Vec3d(maxX, maxY, minZ);
+        Vec3d p010 = new Vec3d(minX, maxY, minZ);
+        Vec3d p001 = new Vec3d(minX, minY, maxZ);
+        Vec3d p101 = new Vec3d(maxX, minY, maxZ);
+        Vec3d p111 = new Vec3d(maxX, maxY, maxZ);
+        Vec3d p011 = new Vec3d(minX, maxY, maxZ);
+
+        addQuad(buffer, matrix, p000, p100, p110, p010, red, green, blue, alpha); // north
+        addQuad(buffer, matrix, p101, p001, p011, p111, red, green, blue, alpha); // south
+        addQuad(buffer, matrix, p100, p101, p111, p110, red, green, blue, alpha); // east
+        addQuad(buffer, matrix, p001, p000, p010, p011, red, green, blue, alpha); // west
+        addQuad(buffer, matrix, p010, p110, p111, p011, red, green, blue, alpha); // up
+        addQuad(buffer, matrix, p001, p101, p100, p000, red, green, blue, alpha); // down
+    }
+
+    private static void addAxisAlignedCubeWire(
+            BufferBuilder lines,
+            Matrix4f matrix,
+            Vec3d center,
+            double halfSize,
+            int red,
+            int green,
+            int blue,
+            int alpha
+    ) {
+        double minX = center.x - halfSize;
+        double minY = center.y - halfSize;
+        double minZ = center.z - halfSize;
+        double maxX = center.x + halfSize;
+        double maxY = center.y + halfSize;
+        double maxZ = center.z + halfSize;
+
+        Vec3d p000 = new Vec3d(minX, minY, minZ);
+        Vec3d p100 = new Vec3d(maxX, minY, minZ);
+        Vec3d p110 = new Vec3d(maxX, maxY, minZ);
+        Vec3d p010 = new Vec3d(minX, maxY, minZ);
+        Vec3d p001 = new Vec3d(minX, minY, maxZ);
+        Vec3d p101 = new Vec3d(maxX, minY, maxZ);
+        Vec3d p111 = new Vec3d(maxX, maxY, maxZ);
+        Vec3d p011 = new Vec3d(minX, maxY, maxZ);
+
+        addLine(lines, matrix, p000, p100, red, green, blue, alpha);
+        addLine(lines, matrix, p100, p110, red, green, blue, alpha);
+        addLine(lines, matrix, p110, p010, red, green, blue, alpha);
+        addLine(lines, matrix, p010, p000, red, green, blue, alpha);
+
+        addLine(lines, matrix, p001, p101, red, green, blue, alpha);
+        addLine(lines, matrix, p101, p111, red, green, blue, alpha);
+        addLine(lines, matrix, p111, p011, red, green, blue, alpha);
+        addLine(lines, matrix, p011, p001, red, green, blue, alpha);
+
+        addLine(lines, matrix, p000, p001, red, green, blue, alpha);
+        addLine(lines, matrix, p100, p101, red, green, blue, alpha);
+        addLine(lines, matrix, p110, p111, red, green, blue, alpha);
+        addLine(lines, matrix, p010, p011, red, green, blue, alpha);
+    }
+
+    private static void addQuad(
+            BufferBuilder buffer,
+            Matrix4f matrix,
+            Vec3d a,
+            Vec3d b,
+            Vec3d c,
+            Vec3d d,
+            int red,
+            int green,
+            int blue,
+            int alpha
+    ) {
+        addVertex(buffer, matrix, a, red, green, blue, alpha);
+        addVertex(buffer, matrix, b, red, green, blue, alpha);
+        addVertex(buffer, matrix, c, red, green, blue, alpha);
+        addVertex(buffer, matrix, d, red, green, blue, alpha);
     }
 
     private static void addHandleCross(
