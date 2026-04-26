@@ -888,7 +888,7 @@ public final class PortalSceneRenderer {
         shiftedModelViewMatrix.translate(chunkOffsetX, chunkOffsetY, chunkOffsetZ);
         Matrix4f projectionMatrix = new Matrix4f(RenderSystem.getProjectionMatrix());
 
-        int renderedMeshes = 0;
+        Map<RenderLayer, List<CachedLayerMesh>> visibleMeshesByLayer = new LinkedHashMap<>();
         for (CachedSection section : cachedScene.sections()) {
             if (innerFrustum != null) {
                 double sectionMinX = portal.sceneAnchor().x + section.sectionKey().minBlockX();
@@ -903,38 +903,32 @@ public final class PortalSceneRenderer {
             }
 
             for (CachedLayerMesh mesh : section.meshes()) {
-                mesh.layer().startDrawing();
-                if (forceFramebuffer != null) {
-                    forceFramebuffer.beginWrite(false);
-                }
-                try {
-                    ShaderProgram shader = RenderSystem.getShader();
-                    if (shader == null) {
-                        continue;
-                    }
-                    if (shader.getGlRef() <= 0) {
-                        if (!layerShaderInvalidLogged) {
-                            System.err.println("[Protocol Portals] Layer shader has invalid GL program handle under Iris, skipping portal mesh draw.");
-                            layerShaderInvalidLogged = true;
-                        }
-                        continue;
-                    }
-
-                    try {
-                        mesh.vertexBuffer().bind();
-                        mesh.vertexBuffer().draw(shiftedModelViewMatrix, projectionMatrix, shader);
-                        renderedMeshes++;
-                    } finally {
-                        VertexBuffer.unbind();
-                    }
-                } finally {
-                    mesh.layer().endDrawing();
-                }
+                visibleMeshesByLayer
+                        .computeIfAbsent(mesh.layer(), unused -> new ArrayList<>())
+                        .add(mesh);
             }
+        }
+
+        int renderedMeshes = 0;
+        for (RenderLayer layer : RenderLayer.getBlockLayers()) {
+            List<CachedLayerMesh> layerMeshes = visibleMeshesByLayer.remove(layer);
+            renderedMeshes += drawPortalLayerMeshes(layer, layerMeshes, shiftedModelViewMatrix, projectionMatrix, forceFramebuffer);
+        }
+        for (Map.Entry<RenderLayer, List<CachedLayerMesh>> layerEntry : visibleMeshesByLayer.entrySet()) {
+            renderedMeshes += drawPortalLayerMeshes(
+                    layerEntry.getKey(),
+                    layerEntry.getValue(),
+                    shiftedModelViewMatrix,
+                    projectionMatrix,
+                    forceFramebuffer
+            );
         }
 
         int renderedBlockEntities = 0;
         if (!cachedScene.blockEntities().isEmpty()) {
+            if (forceFramebuffer != null) {
+                forceFramebuffer.beginWrite(false);
+            }
             VertexConsumerProvider.Immediate vertexConsumers = client.getBufferBuilders().getEntityVertexConsumers();
             MatrixStack blockMatrices = new MatrixStack();
             blockMatrices.translate(-camera.x, -camera.y, -camera.z);
@@ -980,11 +974,58 @@ public final class PortalSceneRenderer {
             }
 
             if (renderedBlockEntities > 0) {
+                if (forceFramebuffer != null) {
+                    forceFramebuffer.beginWrite(false);
+                }
                 vertexConsumers.draw();
             }
         }
 
     }
+
+    private int drawPortalLayerMeshes(
+            RenderLayer layer,
+            @Nullable List<CachedLayerMesh> meshes,
+            Matrix4f shiftedModelViewMatrix,
+            Matrix4f projectionMatrix,
+            @Nullable Framebuffer forceFramebuffer
+    ) {
+        if (meshes == null || meshes.isEmpty()) {
+            return 0;
+        }
+
+        layer.startDrawing();
+        if (forceFramebuffer != null) {
+            forceFramebuffer.beginWrite(false);
+        }
+
+        int renderedMeshes = 0;
+        try {
+            ShaderProgram shader = RenderSystem.getShader();
+            if (shader == null) {
+                return 0;
+            }
+            if (shader.getGlRef() <= 0) {
+                if (!layerShaderInvalidLogged) {
+                    System.err.println("[Protocol Portals] Layer shader has invalid GL program handle under Iris, skipping portal mesh draw.");
+                    layerShaderInvalidLogged = true;
+                }
+                return 0;
+            }
+
+            for (CachedLayerMesh mesh : meshes) {
+                mesh.vertexBuffer().bind();
+                mesh.vertexBuffer().draw(shiftedModelViewMatrix, projectionMatrix, shader);
+                renderedMeshes++;
+            }
+        } finally {
+            VertexBuffer.unbind();
+            layer.endDrawing();
+        }
+
+        return renderedMeshes;
+    }
+
     private static void usePortalAreaShader() {
         ShaderProgram program = ProtocolPortalsShaders.portalAreaProgram();
         if (program != null && program.getGlRef() > 0) {
