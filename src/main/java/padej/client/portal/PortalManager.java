@@ -1,6 +1,7 @@
 package padej.client.portal;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -11,6 +12,7 @@ import org.jetbrains.annotations.Nullable;
 import padej.client.scene.SceneSnapshot;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -24,6 +26,7 @@ public final class PortalManager {
     private static final double PORTAL_FORWARD_DISTANCE = 3.0D;
     private static final int PORTAL_PREPARE_THREADS = Math.max(2, Runtime.getRuntime().availableProcessors() - 1);
     private static final Direction[] NEIGHBOR_DIRECTIONS = Direction.values();
+    private static final long MAX_EXTERIOR_AIR_FLOOD_VOLUME = 8_000_000L;
     private final List<PortalInstance> activePortals = new ArrayList<>();
     private final List<DebugPlaneInstance> debugPlanes = new ArrayList<>();
     private final ExecutorService portalPrepareExecutor = Executors.newFixedThreadPool(PORTAL_PREPARE_THREADS, runnable -> {
@@ -238,16 +241,23 @@ public final class PortalManager {
         // World-aligned mode: no rotation applied - blocks keep their original world-relative
         // positions (relX = east offset, relY = up offset, relZ = south offset).
         // BlockState is also not rotated since the scene is shown in its original orientation.
+        if (snapshot.blocks().isEmpty()) {
+            return List.of();
+        }
+
         Long2ObjectOpenHashMap<SceneSnapshot.SceneBlock> blocksByPos =
                 new Long2ObjectOpenHashMap<>(Math.max(16, snapshot.blocks().size()));
+        SceneBounds bounds = SceneBounds.from(snapshot.blocks().get(0));
         for (SceneSnapshot.SceneBlock block : snapshot.blocks()) {
             long key = BlockPos.asLong(block.relX(), block.relY(), block.relZ());
             blocksByPos.put(key, block);
+            bounds = bounds.include(block);
         }
 
+        Long2ByteOpenHashMap exteriorAir = computeExteriorAirCells(blocksByPos, bounds);
         List<PortalRenderBlock> out = new ArrayList<>(snapshot.blocks().size());
         for (SceneSnapshot.SceneBlock block : snapshot.blocks()) {
-            if (!shouldKeepSceneBlock(blocksByPos, block)) {
+            if (!shouldKeepSceneBlock(blocksByPos, exteriorAir, block)) {
                 continue;
             }
             out.add(new PortalRenderBlock(
@@ -262,6 +272,7 @@ public final class PortalManager {
 
     private static boolean shouldKeepSceneBlock(
             Long2ObjectOpenHashMap<SceneSnapshot.SceneBlock> blocksByPos,
+            @Nullable Long2ByteOpenHashMap exteriorAir,
             SceneSnapshot.SceneBlock block
     ) {
         if (block.blockEntityNbt() != null) {
@@ -275,12 +286,19 @@ public final class PortalManager {
         int y = block.relY();
         int z = block.relZ();
         for (Direction direction : NEIGHBOR_DIRECTIONS) {
-            SceneSnapshot.SceneBlock neighbor = blocksByPos.get(BlockPos.asLong(
+            long neighborKey = BlockPos.asLong(
                     x + direction.getOffsetX(),
                     y + direction.getOffsetY(),
                     z + direction.getOffsetZ()
-            ));
-            if (neighbor == null || !isDenseSolidCube(neighbor.state())) {
+            );
+            SceneSnapshot.SceneBlock neighbor = blocksByPos.get(neighborKey);
+            if (neighbor != null && isDenseSolidCube(neighbor.state())) {
+                continue;
+            }
+            if (exteriorAir == null) {
+                return true;
+            }
+            if (exteriorAir.containsKey(neighborKey)) {
                 return true;
             }
         }
@@ -289,6 +307,93 @@ public final class PortalManager {
 
     private static boolean isDenseSolidCube(BlockState state) {
         return state.isOpaqueFullCube();
+    }
+
+    @Nullable
+    private static Long2ByteOpenHashMap computeExteriorAirCells(
+            Long2ObjectOpenHashMap<SceneSnapshot.SceneBlock> blocksByPos,
+            SceneBounds bounds
+    ) {
+        int minX = bounds.minX() - 1;
+        int minY = bounds.minY() - 1;
+        int minZ = bounds.minZ() - 1;
+        int maxX = bounds.maxX() + 1;
+        int maxY = bounds.maxY() + 1;
+        int maxZ = bounds.maxZ() + 1;
+
+        long spanX = (long) maxX - minX + 1L;
+        long spanY = (long) maxY - minY + 1L;
+        long spanZ = (long) maxZ - minZ + 1L;
+        long floodVolume = spanX * spanY * spanZ;
+
+        // Safety valve: for extremely large captures keep previous lightweight behavior.
+        if (floodVolume <= 0L || floodVolume > MAX_EXTERIOR_AIR_FLOOD_VOLUME) {
+            return null;
+        }
+
+        int initialCapacity = (int) Math.max(16L, Math.min(Integer.MAX_VALUE, floodVolume / 4L));
+        Long2ByteOpenHashMap exteriorAir = new Long2ByteOpenHashMap(initialCapacity);
+        ArrayDeque<Long> queue = new ArrayDeque<>(Math.max(64, initialCapacity / 8));
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                enqueueExteriorAirIfOpen(x, y, minZ, blocksByPos, exteriorAir, queue);
+                enqueueExteriorAirIfOpen(x, y, maxZ, blocksByPos, exteriorAir, queue);
+            }
+        }
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ + 1; z < maxZ; z++) {
+                enqueueExteriorAirIfOpen(x, minY, z, blocksByPos, exteriorAir, queue);
+                enqueueExteriorAirIfOpen(x, maxY, z, blocksByPos, exteriorAir, queue);
+            }
+        }
+        for (int y = minY + 1; y < maxY; y++) {
+            for (int z = minZ + 1; z < maxZ; z++) {
+                enqueueExteriorAirIfOpen(minX, y, z, blocksByPos, exteriorAir, queue);
+                enqueueExteriorAirIfOpen(maxX, y, z, blocksByPos, exteriorAir, queue);
+            }
+        }
+
+        while (!queue.isEmpty()) {
+            long current = queue.removeFirst();
+            int x = BlockPos.unpackLongX(current);
+            int y = BlockPos.unpackLongY(current);
+            int z = BlockPos.unpackLongZ(current);
+
+            for (Direction direction : NEIGHBOR_DIRECTIONS) {
+                int nx = x + direction.getOffsetX();
+                int ny = y + direction.getOffsetY();
+                int nz = z + direction.getOffsetZ();
+                if (nx < minX || nx > maxX || ny < minY || ny > maxY || nz < minZ || nz > maxZ) {
+                    continue;
+                }
+                enqueueExteriorAirIfOpen(nx, ny, nz, blocksByPos, exteriorAir, queue);
+            }
+        }
+
+        return exteriorAir;
+    }
+
+    private static void enqueueExteriorAirIfOpen(
+            int x,
+            int y,
+            int z,
+            Long2ObjectOpenHashMap<SceneSnapshot.SceneBlock> blocksByPos,
+            Long2ByteOpenHashMap exteriorAir,
+            ArrayDeque<Long> queue
+    ) {
+        long key = BlockPos.asLong(x, y, z);
+        if (exteriorAir.containsKey(key)) {
+            return;
+        }
+
+        SceneSnapshot.SceneBlock block = blocksByPos.get(key);
+        if (block != null && isDenseSolidCube(block.state())) {
+            return;
+        }
+
+        exteriorAir.put(key, (byte) 1);
+        queue.addLast(key);
     }
 
     private List<PortalLightSample> prepareLightSamples(SceneSnapshot snapshot) {
@@ -384,6 +489,37 @@ public final class PortalManager {
     }
 
     private record PlaneBasis(Vec3d normal, Vec3d right, Vec3d up) {
+    }
+
+    private record SceneBounds(
+            int minX,
+            int minY,
+            int minZ,
+            int maxX,
+            int maxY,
+            int maxZ
+    ) {
+        private static SceneBounds from(SceneSnapshot.SceneBlock block) {
+            return new SceneBounds(
+                    block.relX(),
+                    block.relY(),
+                    block.relZ(),
+                    block.relX(),
+                    block.relY(),
+                    block.relZ()
+            );
+        }
+
+        private SceneBounds include(SceneSnapshot.SceneBlock block) {
+            return new SceneBounds(
+                    Math.min(minX, block.relX()),
+                    Math.min(minY, block.relY()),
+                    Math.min(minZ, block.relZ()),
+                    Math.max(maxX, block.relX()),
+                    Math.max(maxY, block.relY()),
+                    Math.max(maxZ, block.relZ())
+            );
+        }
     }
 
     @Nullable
