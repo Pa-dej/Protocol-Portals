@@ -10,5 +10,5 @@ out vec4 fragColor;
 void main() {
     vec2 uv = gl_FragCoord.xy / ScreenSize;
     vec4 sampledColor = texture(Sampler0, uv);
-    fragColor = sampledColor * vertexColor;
+    fragColor = vec4(sampledColor.rgb * vertexColor.rgb, 1.0);
 }

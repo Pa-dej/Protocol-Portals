@@ -102,6 +102,7 @@ public final class PortalSceneRenderer {
     private boolean irisCompositeShaderMissingLogged = false;
     private boolean irisCompositeShaderInvalidLogged = false;
     private boolean layerShaderInvalidLogged = false;
+    private boolean fabulousBlockEntitiesDisabledLogged = false;
     @Nullable
     private SimpleFramebuffer irisPortalFramebuffer;
     private int irisPortalFramebufferWidth = -1;
@@ -649,8 +650,9 @@ public final class PortalSceneRenderer {
             return;
         }
 
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
+        // Offscreen portal content is already fully composited (including translucency),
+        // so blending it again with the main framebuffer causes ghost/shadow artifacts.
+        RenderSystem.disableBlend();
         RenderSystem.enableDepthTest();
         // Keep portal composite in the world depth chain so later fabulous passes
         // (clouds/particles/translucent block entities) cannot leak through it.
@@ -926,6 +928,13 @@ public final class PortalSceneRenderer {
 
         int renderedBlockEntities = 0;
         if (!cachedScene.blockEntities().isEmpty()) {
+            if (forceFramebuffer != null && fabulousModeThisFrame) {
+                if (!fabulousBlockEntitiesDisabledLogged) {
+                    System.err.println("[Protocol Portals] Fabulous mode: portal block entities are disabled to prevent surface ghost artifacts.");
+                    fabulousBlockEntitiesDisabledLogged = true;
+                }
+                return;
+            }
             if (forceFramebuffer != null) {
                 forceFramebuffer.beginWrite(false);
             }
