@@ -92,9 +92,11 @@ public final class PortalSceneRenderer {
     );
     private boolean stencilReadyThisFrame = false;
     private boolean irisModeThisFrame = false;
+    private boolean fabulousModeThisFrame = false;
     private boolean stencilUnavailableLogged = false;
     private boolean fallbackModeLogged = false;
     private boolean irisFallbackLogged = false;
+    private boolean fabulousFallbackLogged = false;
     private boolean irisPipelineBypassUnavailableLogged = false;
     private boolean irisPipelineBypassRestoreFailedLogged = false;
     private boolean irisCompositeShaderMissingLogged = false;
@@ -126,14 +128,14 @@ public final class PortalSceneRenderer {
     }
 
     private void renderPortalsAfterEntities(WorldRenderContext context) {
-        if (irisModeThisFrame) {
+        if (irisModeThisFrame || fabulousModeThisFrame) {
             return;
         }
         renderPortals(context);
     }
 
     private void renderPortalsLast(WorldRenderContext context) {
-        if (!irisModeThisFrame) {
+        if (!irisModeThisFrame && !fabulousModeThisFrame) {
             return;
         }
         renderPortals(context);
@@ -149,10 +151,12 @@ public final class PortalSceneRenderer {
             PortalOuterFrustumCulling.clear();
             stencilReadyThisFrame = false;
             irisModeThisFrame = false;
+            fabulousModeThisFrame = false;
             return;
         }
 
         irisModeThisFrame = isIrisShaderPackInUse();
+        fabulousModeThisFrame = !irisModeThisFrame && MinecraftClient.isFabulousGraphicsOrBetter();
         List<PortalInstance> cullingPortals = sortedPortals(camera)
                 .stream()
                 .filter(portal -> isPortalValidForRendering(portal, camera))
@@ -160,7 +164,7 @@ public final class PortalSceneRenderer {
                 .toList();
         PortalOuterFrustumCulling.update(cullingPortals, camera);
 
-        if (irisModeThisFrame) {
+        if (irisModeThisFrame || fabulousModeThisFrame) {
             stencilReadyThisFrame = false;
             return;
         }
@@ -215,7 +219,7 @@ public final class PortalSceneRenderer {
                 clearCachedScenes();
             }
 
-            if (irisModeThisFrame) {
+            if (irisModeThisFrame || fabulousModeThisFrame) {
                 renderUsingIrisFramebuffer(
                         portals,
                         camera,
@@ -281,6 +285,7 @@ public final class PortalSceneRenderer {
         RenderSystem.disableBlend();
         stencilReadyThisFrame = false;
         irisModeThisFrame = false;
+        fabulousModeThisFrame = false;
     }
 
     private List<PortalInstance> sortedPortals(Vec3d camera) {
@@ -552,9 +557,14 @@ public final class PortalSceneRenderer {
         MinecraftClient client = MinecraftClient.getInstance();
         Framebuffer mainFramebuffer = client.getFramebuffer();
         if (!ensureIrisPortalFramebuffer(client) || irisPortalFramebuffer == null) {
-            if (!irisFallbackLogged) {
-                System.err.println("[Protocol Portals] Iris fallback framebuffer is unavailable, using non-stencil fallback path.");
-                irisFallbackLogged = true;
+            if (irisModeThisFrame) {
+                if (!irisFallbackLogged) {
+                    System.err.println("[Protocol Portals] Iris fallback framebuffer is unavailable, using non-stencil fallback path.");
+                    irisFallbackLogged = true;
+                }
+            } else if (!fabulousFallbackLogged) {
+                System.err.println("[Protocol Portals] Fabulous offscreen framebuffer is unavailable, using non-stencil fallback path.");
+                fabulousFallbackLogged = true;
             }
             renderFallbackWithoutStencil(
                     portals,
@@ -596,7 +606,11 @@ public final class PortalSceneRenderer {
             irisPortalFramebuffer.setClearColor((float) skyColor.x, (float) skyColor.y, (float) skyColor.z, 1.0F);
             irisPortalFramebuffer.beginWrite(true);
             irisPortalFramebuffer.clear();
-            renderPortalBlocksWithIrisPipelineBypass(portal, camera, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ);
+            if (irisModeThisFrame) {
+                renderPortalBlocksWithIrisPipelineBypass(portal, camera, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ);
+            } else {
+                renderPortalBlocks(portal, camera, portalScissorsEnabled, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ, irisPortalFramebuffer);
+            }
 
             mainFramebuffer.beginWrite(true);
             compositeIrisPortalFramebuffer(portal, viewMatrix, framebufferWidth, framebufferHeight, compositeShader);
@@ -638,8 +652,10 @@ public final class PortalSceneRenderer {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.enableDepthTest();
-        RenderSystem.depthFunc(GL11.GL_ALWAYS);
-        RenderSystem.depthMask(false);
+        // Keep portal composite in the world depth chain so later fabulous passes
+        // (clouds/particles/translucent block entities) cannot leak through it.
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        RenderSystem.depthMask(true);
         RenderSystem.setShader(compositeShader);
         RenderSystem.setShaderTexture(0, colorAttachment);
         if (compositeShader.screenSize != null) {
@@ -933,6 +949,11 @@ public final class PortalSceneRenderer {
                 }
 
                 Vec3d worldMin = sceneBlockMin(portal, cachedBlockEntity.localMin());
+                if (forceFramebuffer != null && !isUnitBlockFullyInsidePortalWindow(portal, worldMin)) {
+                    // In fabulous/offscreen rendering some block-entity layers can bypass our
+                    // portal composite clip. Drop edge block entities that would poke outside.
+                    continue;
+                }
                 if (innerFrustum != null && innerFrustum.isFullyOutside(
                         worldMin.x,
                         worldMin.y,
@@ -1170,6 +1191,32 @@ public final class PortalSceneRenderer {
             return true;
         }
         return viewerSide * signedDistance <= PORTAL_FRONT_CLIP_EPSILON;
+    }
+
+    private static boolean isUnitBlockFullyInsidePortalWindow(PortalInstance portal, Vec3d worldMin) {
+        Vec3d right = portal.right().normalize();
+        Vec3d up = portal.up().normalize();
+        double halfWidth = portal.width() * 0.5D - 1.0E-3D;
+        double halfHeight = portal.height() * 0.5D - 1.0E-3D;
+        if (halfWidth <= 0.0D || halfHeight <= 0.0D) {
+            return false;
+        }
+
+        Vec3d center = portal.center();
+        for (int ox = 0; ox <= 1; ox++) {
+            for (int oy = 0; oy <= 1; oy++) {
+                for (int oz = 0; oz <= 1; oz++) {
+                    Vec3d corner = worldMin.add(ox, oy, oz);
+                    Vec3d relative = corner.subtract(center);
+                    double rightOffset = Math.abs(relative.dotProduct(right));
+                    double upOffset = Math.abs(relative.dotProduct(up));
+                    if (rightOffset > halfWidth || upOffset > halfHeight) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     private CachedScene getOrBuildCachedScene(MinecraftClient client, PortalInstance portal) {
