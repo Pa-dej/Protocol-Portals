@@ -18,6 +18,8 @@ public final class PortalEditController {
     @Nullable
     private UUID editingPortalId;
     @Nullable
+    private String editingSceneName;
+    @Nullable
     private DragState activeDrag;
     private boolean primaryDownLastTick = false;
 
@@ -32,16 +34,18 @@ public final class PortalEditController {
         }
 
         this.editingPortalId = portal.get().id();
+        this.editingSceneName = portal.get().sceneName();
         this.activeDrag = null;
         this.primaryDownLastTick = false;
         return true;
     }
 
     public boolean stopEditing() {
-        if (editingPortalId == null) {
+        if (editingPortalId == null && editingSceneName == null) {
             return false;
         }
         editingPortalId = null;
+        editingSceneName = null;
         activeDrag = null;
         primaryDownLastTick = false;
         return true;
@@ -53,19 +57,33 @@ public final class PortalEditController {
     }
 
     public boolean isEditing() {
-        return editingPortalId != null;
+        return editingPortalId != null || editingSceneName != null;
     }
 
     @Nullable
     public PortalInstance editingPortal() {
-        if (editingPortalId == null) {
+        if (editingPortalId != null) {
+            Optional<PortalInstance> byId = portalManager.findPortalById(editingPortalId);
+            if (byId.isPresent()) {
+                return byId.get();
+            }
+        }
+
+        if (editingSceneName == null) {
             return null;
         }
-        return portalManager.findPortalById(editingPortalId).orElse(null);
+
+        Optional<PortalInstance> bySceneName = portalManager.findAnyPortalBySceneName(editingSceneName);
+        if (bySceneName.isPresent()) {
+            editingPortalId = bySceneName.get().id();
+            return bySceneName.get();
+        }
+
+        return null;
     }
 
     public void tick(MinecraftClient client) {
-        if (editingPortalId == null) {
+        if (editingPortalId == null && editingSceneName == null) {
             primaryDownLastTick = false;
             activeDrag = null;
             return;
@@ -77,8 +95,8 @@ public final class PortalEditController {
             return;
         }
 
-        Optional<PortalInstance> portalOptional = portalManager.findPortalById(editingPortalId);
-        if (portalOptional.isEmpty()) {
+        PortalInstance currentPortal = editingPortal();
+        if (currentPortal == null) {
             stopEditing();
             return;
         }
@@ -100,7 +118,7 @@ public final class PortalEditController {
             return;
         }
 
-        PortalInstance portal = portalOptional.get();
+        PortalInstance portal = currentPortal;
         if (!primaryDownLastTick) {
             beginDrag(portal, cameraRay);
         } else {

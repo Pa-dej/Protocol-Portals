@@ -485,8 +485,14 @@ public final class PortalSceneRenderer {
         }
 
         Vec3d center = portal.center();
-        Vec3d right = portal.right();
-        Vec3d up = portal.up();
+        Vec3d right = portal.right().normalize();
+        Vec3d up = portal.up().normalize();
+        Vec3d normal = portal.normal().normalize();
+        Vec3d cameraPos = MinecraftClient.getInstance().gameRenderer.getCamera().getPos();
+        double viewerSide = cameraPos.subtract(center).dotProduct(normal);
+        Vec3d overlayOffset = normal.multiply((viewerSide >= 0.0D ? 1.0D : -1.0D) * 0.04D);
+
+        center = center.add(overlayOffset);
         Vec3d widthHandle = center.add(right.multiply(portal.width() * 0.5D + 0.65D));
         Vec3d widthHandleMirror = center.subtract(right.multiply(portal.width() * 0.5D + 0.65D));
         Vec3d heightHandle = center.add(up.multiply(portal.height() * 0.5D + 0.65D));
@@ -499,6 +505,14 @@ public final class PortalSceneRenderer {
         RenderSystem.depthMask(false);
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         usePortalAreaShader();
+
+        BufferBuilder gizmoFills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        addPlaneQuad(gizmoFills, matrix, center, right, up, 0.24D, 0.24D, 255, 255, 255, 200);
+        addPlaneQuad(gizmoFills, matrix, widthHandle, right, up, 0.24D, 0.24D, 255, 96, 96, 220);
+        addPlaneQuad(gizmoFills, matrix, widthHandleMirror, right, up, 0.24D, 0.24D, 255, 96, 96, 220);
+        addPlaneQuad(gizmoFills, matrix, heightHandle, right, up, 0.24D, 0.24D, 96, 255, 128, 220);
+        addPlaneQuad(gizmoFills, matrix, heightHandleMirror, right, up, 0.24D, 0.24D, 96, 255, 128, 220);
+        BufferRenderer.drawWithGlobalProgram(gizmoFills.end());
 
         BufferBuilder gizmoLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
         addPlaneFrame(gizmoLines, matrix, center, right, up, portal.width(), portal.height(), 255, 230, 80, 255);
@@ -514,6 +528,14 @@ public final class PortalSceneRenderer {
         BufferRenderer.drawWithGlobalProgram(gizmoLines.end());
 
         RenderSystem.disableDepthTest();
+        BufferBuilder xrayFills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        addPlaneQuad(xrayFills, matrix, center, right, up, 0.28D, 0.28D, 255, 255, 255, 110);
+        addPlaneQuad(xrayFills, matrix, widthHandle, right, up, 0.28D, 0.28D, 255, 120, 120, 140);
+        addPlaneQuad(xrayFills, matrix, widthHandleMirror, right, up, 0.28D, 0.28D, 255, 120, 120, 140);
+        addPlaneQuad(xrayFills, matrix, heightHandle, right, up, 0.28D, 0.28D, 120, 255, 150, 140);
+        addPlaneQuad(xrayFills, matrix, heightHandleMirror, right, up, 0.28D, 0.28D, 120, 255, 150, 140);
+        BufferRenderer.drawWithGlobalProgram(xrayFills.end());
+
         BufferBuilder xrayLines = Tessellator.getInstance().begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
         addPlaneFrame(xrayLines, matrix, center, right, up, portal.width(), portal.height(), 255, 255, 180, 170);
         addLine(xrayLines, matrix, center, widthHandle, 255, 120, 120, 170);

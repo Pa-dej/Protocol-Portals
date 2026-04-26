@@ -64,6 +64,15 @@ public final class PortalManager {
         return Optional.of(activePortals.get(index));
     }
 
+    public Optional<PortalInstance> findAnyPortalBySceneName(String sceneName) {
+        for (PortalInstance portal : activePortals) {
+            if (portal.sceneName().equals(sceneName)) {
+                return Optional.of(portal);
+            }
+        }
+        return Optional.empty();
+    }
+
     public Optional<PortalInstance> updatePortalGeometry(
             UUID portalId,
             Vec3d center,
