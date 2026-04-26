@@ -1,42 +1,70 @@
 package padej.client.render;
 
-import net.fabricmc.fabric.api.client.rendering.v1.CoreShaderRegistrationCallback;
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gl.Defines;
 import net.minecraft.client.gl.ShaderProgram;
+import net.minecraft.client.gl.ShaderProgramKey;
 import net.minecraft.client.render.VertexFormats;
 import net.minecraft.util.Identifier;
+import org.jetbrains.annotations.Nullable;
 import padej.Main;
 
-import java.io.IOException;
-
 public final class ProtocolPortalsShaders {
-    private static ShaderProgram portalAreaProgram;
-    private static ShaderProgram portalCompositeProgram;
+    private static final ShaderProgramKey PORTAL_AREA_KEY = new ShaderProgramKey(
+            Identifier.of(Main.MOD_ID, "core/portal_area"),
+            VertexFormats.POSITION_COLOR,
+            Defines.EMPTY
+    );
+    private static final ShaderProgramKey PORTAL_COMPOSITE_KEY = new ShaderProgramKey(
+            Identifier.of(Main.MOD_ID, "core/portal_composite"),
+            VertexFormats.POSITION_COLOR,
+            Defines.EMPTY
+    );
+    private static boolean missingShaderLoaderLogged = false;
 
     private ProtocolPortalsShaders() {
     }
 
     public static void register() {
-        CoreShaderRegistrationCallback.EVENT.register(ProtocolPortalsShaders::registerShaders);
+        // 1.21.4+: shaders are loaded by ShaderLoader via ShaderProgramKey.
+        // We keep explicit keys and resolve programs lazily from the render thread.
     }
 
-    private static void registerShaders(CoreShaderRegistrationCallback.RegistrationContext context) throws IOException {
-        context.register(
-                Identifier.of(Main.MOD_ID, "portal_area"),
-                VertexFormats.POSITION_COLOR,
-                shaderProgram -> portalAreaProgram = shaderProgram
-        );
-        context.register(
-                Identifier.of(Main.MOD_ID, "portal_composite"),
-                VertexFormats.POSITION_COLOR,
-                shaderProgram -> portalCompositeProgram = shaderProgram
-        );
-    }
-
+    @Nullable
     public static ShaderProgram portalAreaProgram() {
-        return portalAreaProgram;
+        return resolveProgram(PORTAL_AREA_KEY);
     }
 
+    @Nullable
     public static ShaderProgram portalCompositeProgram() {
-        return portalCompositeProgram;
+        return resolveProgram(PORTAL_COMPOSITE_KEY);
+    }
+
+    @Nullable
+    private static ShaderProgram resolveProgram(ShaderProgramKey key) {
+        if (!RenderSystem.isOnRenderThread()) {
+            return null;
+        }
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null || client.getShaderLoader() == null) {
+            if (!missingShaderLoaderLogged) {
+                System.err.println("[Protocol Portals] Shader loader is unavailable while resolving " + key.configId() + ".");
+                missingShaderLoaderLogged = true;
+            }
+            return null;
+        }
+
+        try {
+            ShaderProgram program = client.getShaderLoader().getOrCreateProgram(key);
+            if (program != null && program.getGlRef() > 0) {
+                missingShaderLoaderLogged = false;
+                return program;
+            }
+            return null;
+        } catch (RuntimeException exception) {
+            System.err.println("[Protocol Portals] Failed to resolve shader program " + key.configId() + ": " + exception.getMessage());
+            return null;
+        }
     }
 }

@@ -7,7 +7,6 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.EmptyBlockView;
 import org.jetbrains.annotations.Nullable;
 import padej.client.scene.SceneSnapshot;
 
@@ -25,8 +24,6 @@ public final class PortalManager {
     private static final double PORTAL_FORWARD_DISTANCE = 3.0D;
     private static final int PORTAL_PREPARE_THREADS = Math.max(2, Runtime.getRuntime().availableProcessors() - 1);
     private static final Direction[] NEIGHBOR_DIRECTIONS = Direction.values();
-    private static final BlockPos ORIGIN_POS = new BlockPos(0, 0, 0);
-
     private final List<PortalInstance> activePortals = new ArrayList<>();
     private final List<DebugPlaneInstance> debugPlanes = new ArrayList<>();
     private final ExecutorService portalPrepareExecutor = Executors.newFixedThreadPool(PORTAL_PREPARE_THREADS, runnable -> {
@@ -229,6 +226,14 @@ public final class PortalManager {
         return plane;
     }
 
+    public Optional<DebugPlaneInstance> removeNearestDebugPlane(Vec3d position) {
+        int index = findNearestDebugPlaneIndex(position);
+        if (index < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(debugPlanes.remove(index));
+    }
+
     private List<PortalRenderBlock> prepareRenderBlocks(SceneSnapshot snapshot) {
         // World-aligned mode: no rotation applied - blocks keep their original world-relative
         // positions (relX = east offset, relY = up offset, relZ = south offset).
@@ -283,7 +288,7 @@ public final class PortalManager {
     }
 
     private static boolean isDenseSolidCube(BlockState state) {
-        return state.isOpaqueFullCube(EmptyBlockView.INSTANCE, ORIGIN_POS);
+        return state.isOpaqueFullCube();
     }
 
     private List<PortalLightSample> prepareLightSamples(SceneSnapshot snapshot) {
@@ -326,6 +331,22 @@ public final class PortalManager {
             }
 
             double distanceSq = squaredHorizontalDistance(position, portal.center());
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestIndex = i;
+            }
+        }
+
+        return bestIndex;
+    }
+
+    private int findNearestDebugPlaneIndex(Vec3d position) {
+        int bestIndex = -1;
+        double bestDistanceSq = Double.POSITIVE_INFINITY;
+
+        for (int i = 0; i < debugPlanes.size(); i++) {
+            DebugPlaneInstance plane = debugPlanes.get(i);
+            double distanceSq = squaredHorizontalDistance(position, plane.center());
             if (distanceSq < bestDistanceSq) {
                 bestDistanceSq = distanceSq;
                 bestIndex = i;

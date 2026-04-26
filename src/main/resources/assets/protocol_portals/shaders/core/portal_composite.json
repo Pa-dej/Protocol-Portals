@@ -1,6 +1,6 @@
 {
-  "vertex": "protocol_portals:portal_composite",
-  "fragment": "protocol_portals:portal_composite",
+  "vertex": "protocol_portals:core/portal_composite",
+  "fragment": "protocol_portals:core/portal_composite",
   "samplers": [
     {
       "name": "Sampler0"

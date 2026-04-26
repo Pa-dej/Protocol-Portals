@@ -2,6 +2,7 @@ package padej.client.command;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
@@ -13,6 +14,7 @@ import org.jetbrains.annotations.Nullable;
 import padej.client.portal.PortalInstance;
 import padej.client.portal.PortalManager;
 import padej.client.screen.ProtocolPortalsScreen;
+import padej.client.render.PortalSceneRenderer;
 import padej.client.scene.SceneRepository;
 import padej.client.scene.SceneSnapshot;
 
@@ -41,9 +43,16 @@ public final class ProtocolPortalsCommand {
                                         .then(ClientCommandManager.argument("fileName", StringArgumentType.word())
                                                 .executes(this::createPortal)
                                                 .then(ClientCommandManager.argument("serverAddress", StringArgumentType.word())
-                                                        .executes(this::createPortalWithServerAddress))))
-                                .then(ClientCommandManager.literal("debug-plane")
-                                        .executes(this::createDebugPlane)))
+                                                        .executes(this::createPortalWithServerAddress)))))
+                        .then(ClientCommandManager.literal("debug")
+                                .then(ClientCommandManager.literal("spawn")
+                                        .then(ClientCommandManager.literal("test-plane")
+                                                .executes(this::spawnTestPlane)))
+                                .then(ClientCommandManager.literal("remove")
+                                        .executes(this::removeNearestDebugPlane))
+                                .then(ClientCommandManager.literal("portal-scissors")
+                                        .then(ClientCommandManager.argument("enabled", BoolArgumentType.bool())
+                                                .executes(this::setPortalScissors))))
                         .then(ClientCommandManager.literal("remove")
                                 .then(ClientCommandManager.literal("portal")
                                         .executes(this::removeNearestPortal)
@@ -193,17 +202,45 @@ public final class ProtocolPortalsCommand {
         return 1;
     }
 
-    private int createDebugPlane(CommandContext<FabricClientCommandSource> context) {
+    private int spawnTestPlane(CommandContext<FabricClientCommandSource> context) {
         FabricClientCommandSource source = context.getSource();
         if (source.getClient().player == null) {
-            source.sendError(Text.literal("You must be in world to create debug plane."));
+            source.sendError(Text.literal("You must be in world to spawn test plane."));
             return 0;
         }
 
         var plane = portalManager.createDebugPlane(source.getClient().player);
-        source.sendFeedback(Text.literal("Debug plane created at "
+        source.sendFeedback(Text.literal("Test plane created at "
                 + formatVec(plane.center().x, plane.center().y, plane.center().z)
                 + ", size 3x3."));
+        return 1;
+    }
+
+    private int removeNearestDebugPlane(CommandContext<FabricClientCommandSource> context) {
+        FabricClientCommandSource source = context.getSource();
+        if (source.getClient().player == null) {
+            source.sendError(Text.literal("You must be in world to remove test plane."));
+            return 0;
+        }
+
+        var removed = portalManager.removeNearestDebugPlane(source.getClient().player.getPos());
+        if (removed.isEmpty()) {
+            source.sendError(Text.literal("No test planes to remove."));
+            return 0;
+        }
+
+        var plane = removed.get();
+        source.sendFeedback(Text.literal("Removed test plane at "
+                + formatVec(plane.center().x, plane.center().y, plane.center().z) + "."));
+        return 1;
+    }
+
+    private int setPortalScissors(CommandContext<FabricClientCommandSource> context) {
+        boolean enabled = BoolArgumentType.getBool(context, "enabled");
+        PortalSceneRenderer.setPortalScissorsEnabled(enabled);
+        context.getSource().sendFeedback(Text.literal(
+                "Portal scissors (scene clipping by portal plane) " + (enabled ? "enabled" : "disabled") + "."
+        ));
         return 1;
     }
 

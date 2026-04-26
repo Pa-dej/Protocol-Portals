@@ -10,13 +10,14 @@ import net.minecraft.block.BlockEntityProvider;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.VertexBuffer;
 import net.minecraft.client.gl.Framebuffer;
+import net.minecraft.client.gl.GlUsage;
 import net.minecraft.client.gl.ShaderProgram;
+import net.minecraft.client.gl.ShaderProgramKeys;
 import net.minecraft.client.gl.SimpleFramebuffer;
 import net.minecraft.client.render.Frustum;
 import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.BufferRenderer;
 import net.minecraft.client.render.BuiltBuffer;
-import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.RenderLayers;
@@ -74,6 +75,7 @@ public final class PortalSceneRenderer {
             "renderingPipeline",
             "worldRenderingPipeline"
     };
+    private static volatile boolean portalScissorsEnabled = false;
     @Nullable
     private static Field irisWorldRendererPipelineField;
     private static boolean irisWorldRendererPipelineFieldResolved = false;
@@ -106,6 +108,14 @@ public final class PortalSceneRenderer {
 
     public PortalSceneRenderer(PortalManager portalManager) {
         this.portalManager = portalManager;
+    }
+
+    public static void setPortalScissorsEnabled(boolean enabled) {
+        portalScissorsEnabled = enabled;
+    }
+
+    public static boolean isPortalScissorsEnabled() {
+        return portalScissorsEnabled;
     }
 
     public void register() {
@@ -206,9 +216,14 @@ public final class PortalSceneRenderer {
             }
 
             if (irisModeThisFrame) {
-                // Temporary Iris compatibility mode:
-                // do not render portal planes/content while shader pack pipeline is active.
-                drawPortalFrames(portals, matrix);
+                renderUsingIrisFramebuffer(
+                        portals,
+                        camera,
+                        cameraForward,
+                        frustum,
+                        tickDelta,
+                        matrix
+                );
                 return;
             }
 
@@ -330,7 +345,7 @@ public final class PortalSceneRenderer {
             RenderSystem.disableCull();
         }
         try {
-            RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
+            usePortalAreaShader();
             RenderSystem.colorMask(false, false, false, false);
             RenderSystem.depthMask(false);
             GL11.glStencilMask(0xFF);
@@ -379,10 +394,9 @@ public final class PortalSceneRenderer {
         GL11.glStencilOp(GL11.GL_KEEP, GL11.GL_KEEP, GL11.GL_KEEP);
         RenderSystem.enableCull();
 
-        // World-aligned mode: blocks are placed along world axes, not along portal normal,
-        // so portal-plane half-space clipping would incorrectly discard large parts of the scene.
-        // The stencil + depth buffer together handle correct visibility - no plane clip needed.
-        renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, null);
+        // World-aligned mode: blocks are placed along world axes, not along portal normal.
+        // Portal-plane half-space clipping is therefore optional and exposed as a debug toggle.
+        renderPortalBlocks(portal, camera, portalScissorsEnabled, tickDelta, maxBlockRenderDistanceSq, null);
     }
 
     private void renderPortalSkyBackground(PortalInstance portal, Matrix4f matrix, Vec3d skyColor) {
@@ -437,7 +451,7 @@ public final class PortalSceneRenderer {
     private void drawPortalFrames(List<PortalInstance> portals, Matrix4f matrix) {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
-        RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
+        usePortalAreaShader();
         boolean stencilWasEnabled = GL11.glIsEnabled(GL11.GL_STENCIL_TEST);
         if (stencilWasEnabled) {
             GL11.glDisable(GL11.GL_STENCIL_TEST);
@@ -465,7 +479,7 @@ public final class PortalSceneRenderer {
         RenderSystem.enableDepthTest();
         RenderSystem.depthMask(false);
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
-        RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
+        usePortalAreaShader();
 
         BufferBuilder fills = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
         for (DebugPlaneInstance plane : debugPlanes) {
@@ -581,7 +595,7 @@ public final class PortalSceneRenderer {
             Vec3d skyColor = portal.skyColor();
             irisPortalFramebuffer.setClearColor((float) skyColor.x, (float) skyColor.y, (float) skyColor.z, 1.0F);
             irisPortalFramebuffer.beginWrite(true);
-            irisPortalFramebuffer.clear(MinecraftClient.IS_SYSTEM_MAC);
+            irisPortalFramebuffer.clear();
             renderPortalBlocksWithIrisPipelineBypass(portal, camera, tickDelta, UNLIMITED_BLOCK_RENDER_DISTANCE_SQ);
 
             mainFramebuffer.beginWrite(true);
@@ -594,7 +608,7 @@ public final class PortalSceneRenderer {
     }
 
     private void prepareDepthForIrisComposite(PortalInstance portal, Matrix4f viewMatrix) {
-        RenderSystem.setShader(PortalSceneRenderer::getPortalAreaShader);
+        usePortalAreaShader();
         RenderSystem.enableDepthTest();
         RenderSystem.colorMask(false, false, false, false);
         RenderSystem.depthMask(true);
@@ -626,7 +640,7 @@ public final class PortalSceneRenderer {
         RenderSystem.enableDepthTest();
         RenderSystem.depthFunc(GL11.GL_ALWAYS);
         RenderSystem.depthMask(false);
-        RenderSystem.setShader(() -> compositeShader);
+        RenderSystem.setShader(compositeShader);
         RenderSystem.setShaderTexture(0, colorAttachment);
         if (compositeShader.screenSize != null) {
             compositeShader.screenSize.set((float) framebufferWidth, (float) framebufferHeight);
@@ -666,14 +680,14 @@ public final class PortalSceneRenderer {
         }
 
         if (irisPortalFramebuffer == null) {
-            irisPortalFramebuffer = new SimpleFramebuffer(framebufferWidth, framebufferHeight, true, MinecraftClient.IS_SYSTEM_MAC);
+            irisPortalFramebuffer = new SimpleFramebuffer(framebufferWidth, framebufferHeight, true);
             irisPortalFramebufferWidth = framebufferWidth;
             irisPortalFramebufferHeight = framebufferHeight;
             return true;
         }
 
         if (irisPortalFramebufferWidth != framebufferWidth || irisPortalFramebufferHeight != framebufferHeight) {
-            irisPortalFramebuffer.resize(framebufferWidth, framebufferHeight, MinecraftClient.IS_SYSTEM_MAC);
+            irisPortalFramebuffer.resize(framebufferWidth, framebufferHeight);
             irisPortalFramebufferWidth = framebufferWidth;
             irisPortalFramebufferHeight = framebufferHeight;
         }
@@ -693,7 +707,7 @@ public final class PortalSceneRenderer {
                 System.err.println("[Protocol Portals] Iris pipeline bypass is unavailable; portal offscreen framebuffer may render empty.");
                 irisPipelineBypassUnavailableLogged = true;
             }
-            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
+            renderPortalBlocks(portal, camera, portalScissorsEnabled, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
             return;
         }
 
@@ -705,7 +719,7 @@ public final class PortalSceneRenderer {
                 System.err.println("[Protocol Portals] Cannot access Iris world-render pipeline field; rendering without bypass.");
                 irisPipelineBypassUnavailableLogged = true;
             }
-            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
+            renderPortalBlocks(portal, camera, portalScissorsEnabled, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
             return;
         }
 
@@ -723,7 +737,7 @@ public final class PortalSceneRenderer {
         }
 
         try {
-            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
+            renderPortalBlocks(portal, camera, portalScissorsEnabled, tickDelta, maxBlockRenderDistanceSq, irisPortalFramebuffer);
         } finally {
             if (pipelineDisabled) {
                 try {
@@ -818,7 +832,7 @@ public final class PortalSceneRenderer {
             if (!isPortalValidForRendering(portal, camera, cameraForward, frustum)) {
                 continue;
             }
-            renderPortalBlocks(portal, camera, false, tickDelta, maxBlockRenderDistanceSq, null);
+            renderPortalBlocks(portal, camera, portalScissorsEnabled, tickDelta, maxBlockRenderDistanceSq, null);
         }
 
         drawPortalFrames(portals, viewMatrix);
@@ -950,16 +964,13 @@ public final class PortalSceneRenderer {
         }
 
     }
-
-    private static ShaderProgram getPortalAreaShader() {
-        if (isIrisShaderPackInUse()) {
-            return GameRenderer.getPositionColorProgram();
-        }
+    private static void usePortalAreaShader() {
         ShaderProgram program = ProtocolPortalsShaders.portalAreaProgram();
         if (program != null && program.getGlRef() > 0) {
-            return program;
+            RenderSystem.setShader(program);
+            return;
         }
-        return GameRenderer.getPositionColorProgram();
+        RenderSystem.setShader(ShaderProgramKeys.POSITION_COLOR);
     }
 
     private boolean ensureMainFramebufferStencil(Framebuffer framebuffer) {
@@ -1137,7 +1148,7 @@ public final class PortalSceneRenderer {
     }
 
     private static void drawScreenTriangle() {
-        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+        RenderSystem.setShader(ShaderProgramKeys.POSITION_COLOR);
         Matrix4f identity = new Matrix4f().identity();
         BufferBuilder buffer = Tessellator.getInstance().begin(VertexFormat.DrawMode.TRIANGLES, VertexFormats.POSITION_COLOR);
         buffer.vertex(identity, -1.0F, -1.0F, 0.0F).color(255, 255, 255, 255);
@@ -1333,7 +1344,7 @@ public final class PortalSceneRenderer {
         }
 
         try (builtBuffer) {
-            VertexBuffer vertexBuffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+            VertexBuffer vertexBuffer = new VertexBuffer(GlUsage.STATIC_WRITE);
             try {
                 vertexBuffer.bind();
                 vertexBuffer.upload(builtBuffer);

@@ -211,7 +211,7 @@ public final class SceneRepository {
 
         int solidBlockMinY = Math.max(world.getBottomY(), centerY - CAPTURE_BLOCKS_BELOW_PLAYER);
         int minY = world.getBottomY();
-        int maxY = world.getTopY() - 1;
+        int maxY = world.getTopYInclusive();
         int horizontalRadiusBlocks = captureChunkRadius * 16;
         int verticalRadiusBlocks = Math.max(centerY - solidBlockMinY, maxY - centerY);
 
@@ -388,7 +388,7 @@ public final class SceneRepository {
                         continue;
                     }
 
-                    boolean denseFullCube = state.isOpaqueFullCube(session.world, session.mutableWorldPos);
+                    boolean denseFullCube = state.isOpaqueFullCube();
                     if (denseFullCube && y < session.solidBlockMinY) {
                         continue;
                     }
@@ -579,7 +579,7 @@ public final class SceneRepository {
             int maxZ
     ) {
         // Keep all non-full or non-opaque blocks (stairs, slabs, fences, glass, foliage, etc.).
-        if (!state.isOpaqueFullCube(world, worldPos)) {
+        if (!state.isOpaqueFullCube()) {
             return true;
         }
 
@@ -599,7 +599,7 @@ public final class SceneRepository {
 
             neighborPos.set(nx, ny, nz);
             BlockState neighborState = world.getBlockState(neighborPos);
-            if (neighborState.isAir() || !neighborState.isOpaqueFullCube(world, neighborPos)) {
+            if (neighborState.isAir() || !neighborState.isOpaqueFullCube()) {
                 return true;
             }
         }
@@ -608,7 +608,7 @@ public final class SceneRepository {
     }
 
     private static Vec3d captureSkyColor(ClientWorld world, Vec3d cameraPos) {
-        return world.getSkyColor(cameraPos, 1.0F);
+        return Vec3d.unpackRgb(world.getSkyColor(cameraPos, 1.0F));
     }
 
     private static final class CaptureSession {

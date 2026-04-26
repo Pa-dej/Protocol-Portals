@@ -1,6 +1,5 @@
 package padej.mixin.client.render.framebuffer;
 
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gl.Framebuffer;
 import org.lwjgl.opengl.ARBFramebufferObject;
 import org.lwjgl.opengl.GL30;
@@ -32,7 +31,7 @@ public abstract class MixinFramebuffer implements StencilFramebufferAccess {
     public int textureHeight;
 
     @Shadow
-    public abstract void resize(int width, int height, boolean getError);
+    public abstract void resize(int width, int height);
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void protocolPortals$onInit(boolean useDepthAttachment, CallbackInfo ci) {
@@ -82,7 +81,7 @@ public abstract class MixinFramebuffer implements StencilFramebufferAccess {
 
         protocolPortals$stencilBufferEnabled = enabled;
         if (textureWidth > 0 && textureHeight > 0) {
-            resize(textureWidth, textureHeight, MinecraftClient.IS_SYSTEM_MAC);
+            resize(textureWidth, textureHeight);
         }
     }
 }
